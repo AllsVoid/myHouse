@@ -4,7 +4,7 @@ Excel 文件解析器
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, Union
 
 from .base_parser import BaseParser
 
@@ -90,10 +90,17 @@ class ExcelParser(BaseParser):
                             }
                         )
 
+            # 将记录列表转换为文本格式
+            content_lines = []
+            for record in records:
+                school = record["school"]
+                zone_desc = record["zone_desc"]
+                content_lines.append(f"{school}：{zone_desc}")
+
             return {
                 "success": True,
                 "file_path": str(file_path),
-                "content": records,
+                "content": "\n\n".join(content_lines),
                 "error": None,
             }
 
