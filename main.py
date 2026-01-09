@@ -6,14 +6,17 @@
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import List
 
 from app.data_trans import DataTrans
+from app.data_trans.ai import Ai
 
 # 配置常量
 INPUT_DIR = Path("data/files")
 OUTPUT_DIR = Path("data/outputs")
+JSON_DIR = Path("data/json")
 OUTPUT_FORMAT = ".txt"  # 输出文件格式 (纯文本内容)
 
 
@@ -210,6 +213,199 @@ def update_single_file(file_path: Path, verbose: bool = False) -> None:
         print(f"[FAIL] 处理失败: {e}")
 
 
+def transform(dry_run: bool = False, verbose: bool = False) -> None:
+    """
+    执行 transform 操作：调用 AI 将 data/outputs 中的文本转换为结构化 JSON
+
+    Args:
+        dry_run: 如果为 True，只打印将要处理的文件，不实际执行
+        verbose: 是否输出详细信息
+    """
+    # 确保输出目录存在
+    JSON_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 获取所有待处理的 txt 文件
+    txt_files = sorted(OUTPUT_DIR.glob("*.txt"))
+    # 排除 _summary.json 等特殊文件
+    txt_files = [f for f in txt_files if not f.name.startswith("_")]
+
+    if not txt_files:
+        print(f"[WARN] 未在 {OUTPUT_DIR} 目录下找到任何 .txt 文件")
+        print(f"       请先执行 'python main.py update' 解析源文件")
+        return
+
+    print(f"[INPUT]  {OUTPUT_DIR}")
+    print(f"[OUTPUT] {JSON_DIR}")
+    print(f"[TOTAL]  {len(txt_files)} 个文件待转换")
+    print("-" * 60)
+
+    if dry_run:
+        print("[DRY-RUN] 将要处理的文件:")
+        for f in txt_files:
+            json_name = f.stem + ".json"
+            print(f"   {f.name} -> {json_name}")
+        return
+
+    # 初始化 AI
+    ai = Ai()
+
+    # 统计
+    success_count = 0
+    fail_count = 0
+    results_summary = []
+    start_time = time.time()
+
+    for i, txt_file in enumerate(txt_files, 1):
+        json_name = txt_file.stem + ".json"
+        json_path = JSON_DIR / json_name
+
+        # 进度显示
+        elapsed = time.time() - start_time
+        avg_time = elapsed / i if i > 1 else 0
+        remaining = avg_time * (len(txt_files) - i)
+        progress = f"[{i}/{len(txt_files)}]"
+        time_info = f"(已用 {elapsed:.0f}s, 剩余约 {remaining:.0f}s)" if i > 1 else ""
+
+        print(f"{progress} 处理: {txt_file.name} {time_info}")
+
+        try:
+            # 读取文本内容
+            content = txt_file.read_text(encoding="utf-8")
+            content_len = len(content)
+
+            if verbose:
+                print(f"       文本长度: {content_len} 字符")
+
+            # 调用 AI 提取地理信息
+            geo_data = ai.extract_geo_info(content)
+
+            # 保存结果
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "source_file": txt_file.name,
+                        "school_count": len(geo_data),
+                        "schools": geo_data,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
+            success_count += 1
+            print(f"       [OK] -> {json_name} (提取到 {len(geo_data)} 个学校)")
+
+            if verbose and geo_data:
+                # 显示第一个学校的信息
+                first = geo_data[0]
+                print(f"       示例: {first.get('school_name', 'N/A')}")
+
+            results_summary.append(
+                {
+                    "input": str(txt_file),
+                    "output": str(json_path),
+                    "success": True,
+                    "school_count": len(geo_data),
+                    "error": None,
+                }
+            )
+
+        except Exception as e:
+            fail_count += 1
+            print(f"       [FAIL] {e}")
+            results_summary.append(
+                {
+                    "input": str(txt_file),
+                    "output": None,
+                    "success": False,
+                    "school_count": 0,
+                    "error": str(e),
+                }
+            )
+
+        # 请求间隔，避免触发限流
+        if i < len(txt_files):
+            time.sleep(0.5)
+
+    # 打印统计
+    total_time = time.time() - start_time
+    print("-" * 60)
+    print(f"[DONE] 成功 {success_count}, 失败 {fail_count}, 共 {len(txt_files)}")
+    print(
+        f"[TIME] 总耗时 {total_time:.1f}s, 平均 {total_time/len(txt_files):.1f}s/文件"
+    )
+
+    # 保存处理摘要
+    summary_path = JSON_DIR / "_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "total": len(txt_files),
+                "success": success_count,
+                "failed": fail_count,
+                "total_time_seconds": round(total_time, 2),
+                "results": results_summary,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    print(f"[SUMMARY] {summary_path}")
+
+
+def transform_single_file(file_path: Path, verbose: bool = False) -> None:
+    """
+    转换单个文件
+
+    Args:
+        file_path: 文本文件路径
+        verbose: 是否输出详细信息
+    """
+    # 确保输出目录存在
+    JSON_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 生成输出文件名
+    json_name = file_path.stem + ".json"
+    json_path = JSON_DIR / json_name
+
+    print(f"[INPUT]  {file_path}")
+    print(f"[OUTPUT] {json_path}")
+    print("-" * 60)
+
+    try:
+        # 读取文本内容
+        content = file_path.read_text(encoding="utf-8")
+        content_len = len(content)
+        print(f"[INFO] 文本长度: {content_len} 字符")
+
+        # 初始化 AI 并提取
+        ai = Ai()
+        geo_data = ai.extract_geo_info(content)
+
+        # 保存结果
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "source_file": file_path.name,
+                    "school_count": len(geo_data),
+                    "schools": geo_data,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        print(f"[OK] -> {json_name} (提取到 {len(geo_data)} 个学校)")
+
+        if verbose and geo_data:
+            print(f"[PREVIEW] 前3个学校:")
+            for school in geo_data[:3]:
+                print(f"  - {school.get('school_name', 'N/A')}")
+
+    except Exception as e:
+        print(f"[FAIL] 处理失败: {e}")
+
+
 def main():
     """主入口函数"""
     parser = argparse.ArgumentParser(
@@ -217,12 +413,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python main.py update              # 解析所有文件
-  python main.py update --dry-run    # 预览模式，不实际执行
-  python main.py update -v           # 详细输出模式
-  python main.py update_single_file <file_path> # 更新单个文件
-  python main.py update_single_file --dry-run <file_path> # 预览模式，不实际执行
-  python main.py update_single_file -v <file_path> # 详细输出模式
+  # 第一步：解析源文件 (PDF/Word/Excel/图片) 为纯文本
+  python main.py update              # 解析所有文件到 data/outputs/
+  python main.py update --dry-run    # 预览模式
+
+  # 第二步：调用 AI 转换为结构化 JSON
+  python main.py transform           # 转换所有文本到 data/json/
+  python main.py transform --dry-run # 预览模式
+  python main.py transform -v        # 详细模式
+
+  # 单文件操作
+  python main.py update_single <file_path>
+  python main.py transform_single <file_path>
         """,
     )
 
@@ -230,21 +432,45 @@ def main():
 
     # update 子命令
     update_parser = subparsers.add_parser(
-        "update", help="扫描并解析 data/files 目录下的所有文件"
+        "update", help="解析 data/files 目录下的源文件为纯文本"
     )
     update_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="预览模式，只显示将要处理的文件，不实际执行",
+        help="预览模式，只显示将要处理的文件",
     )
     update_parser.add_argument(
         "-v", "--verbose", action="store_true", help="输出详细信息"
     )
 
-    # update_single_file 子命令
-    single_parser = subparsers.add_parser("update_single_file", help="更新单个文件")
-    single_parser.add_argument("file_path", type=Path, help="要处理的文件路径")
-    single_parser.add_argument(
+    # transform 子命令
+    transform_parser = subparsers.add_parser(
+        "transform", help="调用 AI 将 data/outputs 中的文本转换为结构化 JSON"
+    )
+    transform_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="预览模式，只显示将要处理的文件",
+    )
+    transform_parser.add_argument(
+        "-v", "--verbose", action="store_true", help="输出详细信息"
+    )
+
+    # update_single 子命令
+    update_single_parser = subparsers.add_parser(
+        "update_single", help="解析单个源文件为纯文本"
+    )
+    update_single_parser.add_argument("file_path", type=Path, help="源文件路径")
+    update_single_parser.add_argument(
+        "-v", "--verbose", action="store_true", help="输出详细信息"
+    )
+
+    # transform_single 子命令
+    transform_single_parser = subparsers.add_parser(
+        "transform_single", help="调用 AI 转换单个文本文件为 JSON"
+    )
+    transform_single_parser.add_argument("file_path", type=Path, help="文本文件路径")
+    transform_single_parser.add_argument(
         "-v", "--verbose", action="store_true", help="输出详细信息"
     )
 
@@ -252,8 +478,12 @@ def main():
 
     if args.command == "update":
         update(dry_run=args.dry_run, verbose=args.verbose)
-    elif args.command == "update_single_file":
+    elif args.command == "transform":
+        transform(dry_run=args.dry_run, verbose=args.verbose)
+    elif args.command == "update_single":
         update_single_file(args.file_path, verbose=args.verbose)
+    elif args.command == "transform_single":
+        transform_single_file(args.file_path, verbose=args.verbose)
     else:
         parser.print_help()
         sys.exit(1)
