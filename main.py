@@ -6,12 +6,14 @@
 import argparse
 import json
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 from app.data_trans import DataTrans
-from app.data_trans.ai import Ai
+from app.data_trans.ai import Ai, LLMParseError
 
 # 配置常量
 INPUT_DIR = Path("data/files")
@@ -247,7 +249,11 @@ def transform(dry_run: bool = False, verbose: bool = False) -> None:
         return
 
     # 初始化 AI
-    ai = Ai()
+    try:
+        ai = Ai()
+    except Exception as e:
+        print(f"[FAIL] AI 初始化失败: {e}")
+        return
 
     # 统计
     success_count = 0
@@ -258,6 +264,25 @@ def transform(dry_run: bool = False, verbose: bool = False) -> None:
     for i, txt_file in enumerate(txt_files, 1):
         json_name = txt_file.stem + ".json"
         json_path = JSON_DIR / json_name
+
+        # 检查是否已存在
+        if json_path.exists():
+            if verbose:
+                print(f"{progress} 跳过: {txt_file.name} (JSON 已存在)")
+            else:
+                # 即使跳过也需要保持进度显示的一致性或者静默
+                pass
+
+            results_summary.append(
+                {
+                    "input": str(txt_file),
+                    "output": str(json_path),
+                    "success": True,
+                    "skipped": True,
+                    "error": None,
+                }
+            )
+            continue
 
         # 进度显示
         elapsed = time.time() - start_time
@@ -276,36 +301,52 @@ def transform(dry_run: bool = False, verbose: bool = False) -> None:
             if verbose:
                 print(f"       文本长度: {content_len} 字符")
 
-            # 调用 AI 提取地理信息
-            geo_data = ai.extract_geo_info(content)
+            # 使用流式提取并边生成边写入
+            school_count = 0
 
-            # 保存结果
             with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "source_file": txt_file.name,
-                        "school_count": len(geo_data),
-                        "schools": geo_data,
-                    },
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+                # 写入头部
+                f.write("{\n")
+                f.write(f'  "source_file": "{txt_file.name}",\n')
+                f.write('  "schools": [\n')
+
+                first = True
+                try:
+                    # 调用流式接口
+                    for school in ai.extract_geo_info_stream(content, verbose=verbose):
+                        if not first:
+                            f.write(",\n")
+
+                        # 序列化单个对象并缩进
+                        school_str = json.dumps(school, ensure_ascii=False, indent=4)
+                        # 增加缩进
+                        school_str = "    " + school_str.replace("\n", "\n    ")
+                        f.write(school_str)
+                        f.flush()  # 确保写入磁盘
+
+                        school_count += 1
+                        first = False
+                except Exception as stream_e:
+                    print(f"       [WARN] 流式处理中断: {stream_e}")
+                    # 不重新抛出，视为部分成功
+
+                # 写入尾部
+                f.write("\n  ],\n")
+                f.write(f'  "school_count": {school_count}\n')
+                f.write("}")
 
             success_count += 1
-            print(f"       [OK] -> {json_name} (提取到 {len(geo_data)} 个学校)")
+            print(f"       [OK] -> {json_name} (提取到 {school_count} 个学校)")
 
-            if verbose and geo_data:
-                # 显示第一个学校的信息
-                first = geo_data[0]
-                print(f"       示例: {first.get('school_name', 'N/A')}")
+            if verbose and school_count > 0:
+                pass  # 已经在流式中打印了
 
             results_summary.append(
                 {
                     "input": str(txt_file),
                     "output": str(json_path),
                     "success": True,
-                    "school_count": len(geo_data),
+                    "school_count": school_count,
                     "error": None,
                 }
             )
@@ -353,13 +394,16 @@ def transform(dry_run: bool = False, verbose: bool = False) -> None:
     print(f"[SUMMARY] {summary_path}")
 
 
-def transform_single_file(file_path: Path, verbose: bool = False) -> None:
+def transform_single_file(
+    file_path: Path, verbose: bool = False, force: bool = False
+) -> None:
     """
     转换单个文件
 
     Args:
         file_path: 文本文件路径
         verbose: 是否输出详细信息
+        force: 是否强制覆盖已存在的 JSON
     """
     # 确保输出目录存在
     JSON_DIR.mkdir(parents=True, exist_ok=True)
@@ -367,6 +411,11 @@ def transform_single_file(file_path: Path, verbose: bool = False) -> None:
     # 生成输出文件名
     json_name = file_path.stem + ".json"
     json_path = JSON_DIR / json_name
+
+    if json_path.exists() and not force:
+        print(f"[WARN] 目标文件已存在: {json_path}")
+        print(f"       使用 --force 参数覆盖")
+        return
 
     print(f"[INPUT]  {file_path}")
     print(f"[OUTPUT] {json_path}")
@@ -380,7 +429,11 @@ def transform_single_file(file_path: Path, verbose: bool = False) -> None:
 
         # 初始化 AI 并提取
         ai = Ai()
-        geo_data = ai.extract_geo_info(content)
+        # 传递 verbose 参数，以便控制 stream
+        geo_data = ai.extract_geo_info(content, verbose=verbose)
+
+        if not geo_data:
+            print(f"[WARN] 未提取到任何数据")
 
         # 保存结果
         with open(json_path, "w", encoding="utf-8") as f:
@@ -395,7 +448,10 @@ def transform_single_file(file_path: Path, verbose: bool = False) -> None:
                 indent=2,
             )
 
-        print(f"[OK] -> {json_name} (提取到 {len(geo_data)} 个学校)")
+        if not json_path.exists():
+            print(f"[ERR] 文件写入失败，未找到: {json_path}")
+        else:
+            print(f"[OK] -> {json_name} (提取到 {len(geo_data)} 个学校)")
 
         if verbose and geo_data:
             print(f"[PREVIEW] 前3个学校:")
@@ -404,6 +460,9 @@ def transform_single_file(file_path: Path, verbose: bool = False) -> None:
 
     except Exception as e:
         print(f"[FAIL] 处理失败: {e}")
+        import traceback
+
+        traceback.print_exc()
 
 
 def main():
@@ -455,6 +514,9 @@ def main():
     transform_parser.add_argument(
         "-v", "--verbose", action="store_true", help="输出详细信息"
     )
+    transform_parser.add_argument(
+        "-w", "--workers", type=int, default=4, help="并行工作线程数 (默认: 4)"
+    )
 
     # update_single 子命令
     update_single_parser = subparsers.add_parser(
@@ -473,6 +535,9 @@ def main():
     transform_single_parser.add_argument(
         "-v", "--verbose", action="store_true", help="输出详细信息"
     )
+    transform_single_parser.add_argument(
+        "-f", "--force", action="store_true", help="强制覆盖已存在的文件"
+    )
 
     args = parser.parse_args()
 
@@ -483,7 +548,7 @@ def main():
     elif args.command == "update_single":
         update_single_file(args.file_path, verbose=args.verbose)
     elif args.command == "transform_single":
-        transform_single_file(args.file_path, verbose=args.verbose)
+        transform_single_file(args.file_path, verbose=args.verbose, force=args.force)
     else:
         parser.print_help()
         sys.exit(1)

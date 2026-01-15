@@ -1,22 +1,99 @@
 """
 火山引擎方舟大模型 AI 助手
-使用 volcenginesdkarkruntime 的 responses API 进行对话
-参考文档: https://www.volcengine.com/docs/82379/1399008
-Files API: https://www.volcengine.com/docs/82379/1870405
+使用 volcenginesdkarkruntime 的 Chat Completions API 进行对话
+参考文档: https://www.volcengine.com/docs/82379/1494384
 """
 
 import json
 import os
 import re
-import tempfile
-from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Union
+from typing import Any, Dict, Generator, List, Optional
 
 from volcenginesdkarkruntime import Ark
 
 # Token 阈值配置 (字符数估算，1个中文字符约等于1.5-2个token)
-MAX_CHARS_DIRECT = 15000  # 直接发送的最大字符数
-MAX_CHARS_PER_SEGMENT = 12000  # 分段处理时每段的最大字符数
+MAX_CHARS_DIRECT = 8000  # 调小阈值，避免输出过长导致截断
+MAX_CHARS_PER_SEGMENT = 6000  # 分段大小也相应调整
+
+# 模型最大输出 tokens
+MAX_COMPLETION_TOKENS = 16384  # doubao 模型支持的最大输出 tokens
+
+# 结构化输出的 JSON Schema
+GEO_JSON_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "school_districts",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "schools": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "school_name": {"type": "string"},
+                            "boundaries": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "type": {
+                                            "type": "string",
+                                            "enum": [
+                                                "road",
+                                                "river",
+                                                "railway",
+                                                "other",
+                                            ],
+                                        },
+                                        "relation": {
+                                            "type": ["string", "null"],
+                                            "enum": [
+                                                "east_of",
+                                                "west_of",
+                                                "south_of",
+                                                "north_of",
+                                                None,
+                                            ],
+                                        },
+                                    },
+                                    "required": ["name", "type", "relation"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "includes": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "type": {
+                                            "type": "string",
+                                            "enum": [
+                                                "village",
+                                                "community",
+                                                "estate",
+                                                "other",
+                                            ],
+                                        },
+                                    },
+                                    "required": ["name", "type"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["school_name", "boundaries", "includes"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["schools"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 # 提取地理信息的 Prompt 模板
 GEO_EXTRACTION_PROMPT = """# Role
@@ -36,57 +113,108 @@ GEO_EXTRACTION_PROMPT = """# Role
 3. **includes (包含区域)**: 
    - 提取文本中明确列举的块状区域（如：村庄、小区、社区）。
 
-# Output Format (JSON Array)
-请严格遵守以下 JSON 结构。如果文本中包含多个学校，返回一个数组。不要返回任何多余的解释文字：
+# Output Format (JSON Object)
+请严格遵守以下 JSON 结构。所有学校信息放在 schools 数组中。不要返回任何多余的解释文字：
 
-[
-  {
-    "school_name": "string",
-    "boundaries": [
-      {
-        "name": "string",
-        "type": "road | river | railway | other",
-        "relation": "east_of | west_of | south_of | north_of | null"
-      }
-    ],
-    "includes": [
-      {
-        "name": "string",
-        "type": "village | community | estate | other"
-      }
-    ]
-  }
-]
+{
+  "schools": [
+    {
+      "school_name": "string",
+      "boundaries": [
+        {
+          "name": "string",
+          "type": "road | river | railway | other",
+          "relation": "east_of | west_of | south_of | north_of | null"
+        }
+      ],
+      "includes": [
+        {
+          "name": "string",
+          "type": "village | community | estate | other"
+        }
+      ]
+    }
+  ]
+}
+
+# Input Text
+{input_text}
 """
 
-# 文件上传后的提取 Prompt
-GEO_EXTRACTION_WITH_FILE_PROMPT = """请阅读上传的文件内容，这是一份学校施教区划分文档。
 
-# 任务
-从文档中提取每个学校的施教区地理信息，转换为结构化 JSON 数据。
+class LLMParseError(Exception):
+    """LLM 响应解析错误，包含原始响应内容"""
 
-# Extraction Rules
-1. **school_name**: 学校名称
-2. **boundaries (边界线)**: 
-   - 道路/河流等线状边界
-   - relation 表示施教区相对于边界的方位：
-     - "XX路以东" -> "east_of"
-     - "XX路以西" -> "west_of"  
-     - "XX路以南" -> "south_of"
-     - "XX路以北" -> "north_of"
-3. **includes**: 明确包含的小区/村庄
+    def __init__(self, message: str, raw_response: str):
+        super().__init__(message)
+        self.raw_response = raw_response
 
-# Output Format (JSON Array)
-返回 JSON 数组，每个学校一个对象。不要返回任何解释文字，只返回 JSON：
 
-[
-  {
-    "school_name": "string",
-    "boundaries": [{"name": "string", "type": "road|river|railway|other", "relation": "east_of|west_of|south_of|north_of|null"}],
-    "includes": [{"name": "string", "type": "village|community|estate|other"}]
-  }
-]
-"""
+class StreamJsonParser:
+    """简单的流式 JSON 解析器，用于提取数组中的对象"""
+
+    def __init__(self):
+        self.decoder = json.JSONDecoder()
+        self.buffer = ""
+        self.in_array = False
+        self.array_finished = False
+
+    def feed(self, chunk: str) -> List[Dict[str, Any]]:
+        self.buffer += chunk
+        objects = []
+
+        if self.array_finished:
+            return []
+
+        if not self.in_array:
+            # 寻找数组开始 "schools": [ 或者直接 [
+            # 考虑到可能有 markdown 代码块 ```json
+            array_start = self.buffer.find("[")
+            if array_start != -1:
+                self.in_array = True
+                self.buffer = self.buffer[array_start + 1 :]
+            else:
+                # 保持 buffer 大小合理，丢弃无用前缀（如果有）
+                # 但要小心不要丢弃了 "schools": [ 的部分
+                if len(self.buffer) > 2000 and "[" not in self.buffer:
+                    self.buffer = self.buffer[-500:]
+                return []
+
+        # 尝试解析对象
+        while True:
+            # 跳过空白和逗号
+            idx = 0
+            while idx < len(self.buffer) and self.buffer[idx] in " \t\n\r,":
+                idx += 1
+
+            if idx >= len(self.buffer):
+                # 只有空白，保留 buffer
+                self.buffer = self.buffer[idx:]
+                break
+
+            if self.buffer[idx] == "]":
+                # 数组结束
+                self.buffer = self.buffer[idx + 1 :]
+                self.array_finished = True
+                break
+
+            if self.buffer[idx] == "{":
+                try:
+                    obj, end_idx = self.decoder.raw_decode(self.buffer, idx)
+                    if isinstance(obj, dict) and "school_name" in obj:
+                        objects.append(obj)
+                    self.buffer = self.buffer[end_idx:]
+                    # 继续循环尝试解析下一个
+                except json.JSONDecodeError:
+                    # 解析失败，说明数据不完整，等待更多数据
+                    self.buffer = self.buffer[idx:]
+                    break
+            else:
+                # 非预期字符，可能是乱序或错误，跳过当前字符
+                idx += 1
+                self.buffer = self.buffer[idx:]
+
+        return objects
 
 
 class AiConfig:
@@ -98,6 +226,7 @@ class AiConfig:
         base_url: str = "https://ark.cn-beijing.volces.com/api/v3",
         model: str = "ep-20260109153350-7pdqw",
         thinking_enabled: bool = False,
+        timeout: int = 600,
     ):
         """
         初始化配置
@@ -107,11 +236,13 @@ class AiConfig:
             base_url: API 基础 URL
             model: 模型名称或推理接入点 ID
             thinking_enabled: 是否启用思考模式
+            timeout: 请求超时时间（秒）
         """
         self.api_key = api_key or os.getenv("ARK_API_KEY", "")
         self.base_url = base_url
         self.model = model
         self.thinking_enabled = thinking_enabled
+        self.timeout = timeout
 
     def validate(self) -> bool:
         """验证配置是否完整"""
@@ -151,49 +282,72 @@ class Ai:
             self._client = Ark(
                 base_url=self.config.base_url,
                 api_key=self.config.api_key,
+                timeout=self.config.timeout,
             )
         return self._client
 
-    def _build_extra_body(
-        self, thinking_enabled: Optional[bool] = None
-    ) -> Dict[str, Any]:
-        """构建 extra_body 参数"""
-        enabled = (
-            thinking_enabled
-            if thinking_enabled is not None
-            else self.config.thinking_enabled
-        )
-        return {"thinking": {"type": "enabled" if enabled else "disabled"}}
-
-    def _send_request(
+    def _send_chat_request(
         self,
-        message: Union[str, List[Dict[str, str]]],
-        previous_response_id: Optional[str] = None,
-        model: Optional[str] = None,
-        thinking_enabled: Optional[bool] = None,
-    ) -> Any:
+        messages: List[Dict[str, Any]],
+        use_json_schema: bool = True,
+        verbose: bool = False,
+        stream: bool = False,
+    ) -> str:
         """
-        发送对话请求（内部方法）
+        发送对话请求（内部方法）- 使用 Chat Completions API
 
         Args:
-            message: 用户消息
-            previous_response_id: 上一轮对话的响应 ID
-            model: 模型名称
-            thinking_enabled: 是否启用思考模式
+            messages: 消息列表，格式为 [{"role": "user", "content": "..."}]
+            use_json_schema: 是否使用 JSON Schema 结构化输出
+            verbose: 是否输出调试信息
+            stream: 是否使用流式输出
 
         Returns:
-            API 响应对象
+            模型响应的文本内容
         """
+        if verbose:
+            content_len = sum(len(str(m.get("content", ""))) for m in messages)
+            print(f"       [DEBUG] 发送请求，消息长度: {content_len} 字符...")
+
         request_kwargs: Dict[str, Any] = {
-            "model": model or self.config.model,
-            "input": message,
-            "extra_body": self._build_extra_body(thinking_enabled),
+            "model": self.config.model,
+            "messages": messages,
+            "max_tokens": MAX_COMPLETION_TOKENS,
         }
 
-        if previous_response_id:
-            request_kwargs["previous_response_id"] = previous_response_id
+        # 使用 JSON Schema 确保结构化输出
+        if use_json_schema:
+            request_kwargs["response_format"] = GEO_JSON_SCHEMA
+        if stream:
+            request_kwargs["stream"] = True
 
-        return self.client.responses.create(**request_kwargs)
+        response = self.client.chat.completions.create(**request_kwargs)
+
+        if stream:
+            collected_content = []
+            if verbose:
+                print("       [DEBUG] 正在接收流式响应...")
+
+            for chunk in response:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if hasattr(delta, "content") and delta.content:
+                    content = delta.content
+                    collected_content.append(content)
+                    if verbose:
+                        print(content, end="", flush=True)
+
+            full_content = "".join(collected_content)
+            if verbose:
+                print("\n       [DEBUG] 流式响应接收完成")
+                # print(f"       [DEBUG] 完整内容: {full_content[:100]}...")
+            return full_content
+
+        if verbose:
+            print(f"       [DEBUG] 收到响应")
+
+        return response.choices[0].message.content
 
     def chat_once(self, message: str) -> str:
         """
@@ -205,172 +359,130 @@ class Ai:
         Returns:
             模型响应的文本内容
         """
-        response = self._send_request(message)
-        return self._extract_response_text(response)
-
-    def _extract_response_text(self, response: Any) -> str:
-        """从响应对象中提取文本内容"""
-        if hasattr(response, "output") and hasattr(response.output, "message"):
-            return response.output.message.content
-        elif hasattr(response, "output"):
-            # 尝试其他格式
-            output = response.output
-            if isinstance(output, dict) and "message" in output:
-                return output["message"].get("content", "")
-            elif hasattr(output, "content"):
-                return output.content
-        return str(response)
-
-    # ==================== Files API ====================
-
-    def upload_file(
-        self, file_path: Union[str, Path], purpose: str = "file-extract"
-    ) -> str:
-        """
-        上传文件到火山引擎
-
-        Args:
-            file_path: 文件路径
-            purpose: 文件用途，默认 "file-extract"
-
-        Returns:
-            文件 ID
-        """
-        file_path = Path(file_path)
-        if not file_path.exists():
-            raise FileNotFoundError(f"文件不存在: {file_path}")
-
-        with open(file_path, "rb") as f:
-            response = self.client.files.create(file=f, purpose=purpose)
-
-        return response.id
-
-    def upload_text_as_file(self, text: str, filename: str = "content.txt") -> str:
-        """
-        将文本内容作为文件上传
-
-        Args:
-            text: 文本内容
-            filename: 文件名
-
-        Returns:
-            文件 ID
-        """
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(text)
-            temp_path = f.name
-
-        try:
-            file_id = self.upload_file(temp_path)
-        finally:
-            os.unlink(temp_path)
-
-        return file_id
-
-    def chat_with_file(self, file_id: str, prompt: str) -> str:
-        """
-        基于已上传文件进行对话
-
-        Args:
-            file_id: 已上传的文件 ID
-            prompt: 提示词
-
-        Returns:
-            模型响应的文本内容
-        """
-        # 构建包含文件引用的消息
-        message = [
-            {
-                "type": "file",
-                "file_id": file_id,
-            },
-            {
-                "type": "text",
-                "text": prompt,
-            },
+        messages = [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": ""},
         ]
-
-        response = self._send_request(message)
-        return self._extract_response_text(response)
-
-    def delete_file(self, file_id: str) -> bool:
-        """
-        删除已上传的文件
-
-        Args:
-            file_id: 文件 ID
-
-        Returns:
-            是否删除成功
-        """
-        try:
-            self.client.files.delete(file_id)
-            return True
-        except Exception:
-            return False
+        return self._send_chat_request(messages)
 
     # ==================== 地理信息提取 ====================
 
-    def extract_geo_info(self, text: str) -> List[Dict[str, Any]]:
+    def extract_geo_info_stream(
+        self, text: str, verbose: bool = False
+    ) -> Generator[Dict[str, Any], None, None]:
         """
-        从文本中提取地理信息
-
-        自动选择处理策略:
-        - 短文本: 直接发送
-        - 长文本: 先尝试 Files API，失败则分段处理
+        从文本中流式提取地理信息
 
         Args:
             text: 施教区描述文本
+            verbose: 是否输出调试信息
+
+        Yields:
+            解析出的学校对象
+        """
+        # 强制使用直接发送模式进行流式处理（分段模式比较复杂，暂不支持流式）
+        # 如果文本超长，这里可能会有问题，但对于边生成边写，直接发送是最好的
+        prompt = GEO_EXTRACTION_PROMPT.replace("{input_text}", text)
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": ""},
+        ]
+
+        # 开启 stream
+        # 注意：这里我们绕过 _send_chat_request 的一些逻辑，直接调用 client
+        if verbose:
+            print(f"       [DEBUG] 开始流式提取...")
+
+        request_kwargs: Dict[str, Any] = {
+            "model": self.config.model,
+            "messages": messages,
+            "max_tokens": MAX_COMPLETION_TOKENS,
+            "response_format": GEO_JSON_SCHEMA,
+            "stream": True,
+        }
+
+        response = self.client.chat.completions.create(**request_kwargs)
+        parser = StreamJsonParser()
+
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if hasattr(delta, "content") and delta.content:
+                content = delta.content
+                if verbose:
+                    print(content, end="", flush=True)
+
+                # 解析并 yield
+                objects = parser.feed(content)
+                for obj in objects:
+                    yield obj
+
+        if verbose:
+            print("\n")
+
+    def extract_geo_info(self, text: str, verbose: bool = True) -> List[Dict[str, Any]]:
+        """
+        从文本中提取地理信息
+
+        使用 Chat Completions API + JSON Schema 结构化输出
+        256k 长上下文模型，max_tokens=16384
+
+        处理策略:
+        - 短文本 (<=200000字符): 直接发送
+        - 长文本: 分段处理
+
+        Args:
+            text: 施教区描述文本
+            verbose: 是否输出处理状态
 
         Returns:
             结构化的地理信息列表
         """
         text_len = len(text)
 
-        # 短文本: 直接发送
         if text_len <= MAX_CHARS_DIRECT:
-            return self._extract_geo_direct(text)
+            if verbose:
+                print(f"       [AI] 直接发送模式 ({text_len} 字符)...")
+            return self._extract_geo_direct(text, verbose=verbose)
+        else:
+            if verbose:
+                print(f"       [AI] 文本较长 ({text_len} 字符)，使用分段处理...")
+            return self._extract_geo_segmented(text, verbose=verbose)
 
-        # 长文本: 优先使用 Files API
-        try:
-            return self._extract_geo_with_file(text)
-        except Exception as e:
-            # Files API 失败，降级到分段处理
-            print(f"       [WARN] Files API 失败 ({e})，降级到分段处理")
-            return self._extract_geo_segmented(text)
-
-    def _extract_geo_direct(self, text: str) -> List[Dict[str, Any]]:
-        """直接发送文本提取地理信息"""
+    def _extract_geo_direct(
+        self, text: str, verbose: bool = False
+    ) -> List[Dict[str, Any]]:
+        """直接发送文本提取地理信息 - 使用 Chat Completions API + JSON Schema"""
         prompt = GEO_EXTRACTION_PROMPT.replace("{input_text}", text)
-        response = self.chat_once(prompt)
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": ""},
+        ]
+        # 只有在 verbose 模式下开启 stream
+        response = self._send_chat_request(
+            messages, use_json_schema=True, verbose=verbose
+        )
         return self._parse_json_response(response)
 
-    def _extract_geo_with_file(self, text: str) -> List[Dict[str, Any]]:
-        """通过 Files API 上传后提取地理信息"""
-        # 上传文本为文件
-        file_id = self.upload_text_as_file(text)
-
-        try:
-            # 基于文件对话
-            response = self.chat_with_file(file_id, GEO_EXTRACTION_WITH_FILE_PROMPT)
-            return self._parse_json_response(response)
-        finally:
-            # 清理上传的文件
-            self.delete_file(file_id)
-
-    def _extract_geo_segmented(self, text: str) -> List[Dict[str, Any]]:
+    def _extract_geo_segmented(
+        self, text: str, verbose: bool = False
+    ) -> List[Dict[str, Any]]:
         """分段处理长文本"""
         segments = self._split_by_school(text)
         all_results = []
 
-        for segment in segments:
+        if verbose:
+            print(f"       [AI] 分成 {len(segments)} 个段落处理...")
+
+        for i, segment in enumerate(segments, 1):
             try:
-                results = self._extract_geo_direct(segment)
+                if verbose:
+                    print(f"       [AI] 处理段落 {i}/{len(segments)}...")
+                results = self._extract_geo_direct(segment, verbose=False)
                 all_results.extend(results)
             except Exception as e:
-                print(f"       [WARN] 分段处理失败: {e}")
+                print(f"       [WARN] 段落 {i} 处理失败: {e}")
                 continue
 
         return all_results
@@ -413,7 +525,7 @@ class Ai:
         """
         解析 LLM 返回的 JSON 响应
 
-        处理可能存在的 markdown 代码块包裹
+        处理可能存在的 markdown 代码块包裹和 JSON Schema 格式
         """
         text = response.strip()
 
@@ -425,75 +537,134 @@ class Ai:
         # 尝试解析 JSON
         try:
             result = json.loads(text)
+
+            # 处理 JSON Schema 格式: {"schools": [...]}
+            if isinstance(result, dict) and "schools" in result:
+                return result["schools"]
+
             # 确保返回的是列表
             if isinstance(result, dict):
                 return [result]
             return result
         except json.JSONDecodeError as e:
-            raise ValueError(
-                f"无法解析 LLM 返回的 JSON: {e}\n原始响应: {response[:500]}"
-            )
+            # 尝试从截断的 JSON 中提取已完成的学校对象
+            print(f"       [WARN] JSON 解析失败 ({e})，尝试提取已生成的片段...")
+            try:
+                extracted = self._extract_valid_objects(text)
+                if extracted:
+                    print(f"       [INFO] 成功恢复 {len(extracted)} 个学校数据")
+                    return extracted
+            except Exception as extract_error:
+                print(f"       [WARN] 提取片段失败: {extract_error}")
 
-    # ==================== 多轮对话 ====================
+            raise LLMParseError(f"无法解析 LLM 返回的 JSON: {e}", response)
 
-    def conversation(
-        self,
-        first_message: Optional[str] = None,
-        model: Optional[str] = None,
-        thinking_enabled: Optional[bool] = None,
-    ) -> Generator[Any, str, None]:
+    def stream_extract_geo_info(
+        self, text: str, verbose: bool = False
+    ) -> Generator[Dict[str, Any], None, None]:
         """
-        创建多轮对话生成器
+        流式提取地理信息（生成器模式）
 
-        使用生成器模式进行多轮对话，通过 send() 方法发送后续消息
-
-        Args:
-            first_message: 第一轮对话消息（可选，也可以通过 send() 发送）
-            model: 模型名称
-            thinking_enabled: 是否启用思考模式
-
-        Yields:
-            每轮对话的响应对象
+        实时解析 LLM 的流式输出，每生成一个完整的学校对象就 yield 一次。
+        适合处理超长文本或避免超时丢失数据。
         """
-        previous_response_id: Optional[str] = None
+        prompt = GEO_EXTRACTION_PROMPT.replace("{input_text}", text)
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": ""},
+        ]
 
-        # 处理第一条消息
-        if first_message:
-            message = first_message
-        else:
-            # 等待通过 send() 发送第一条消息
-            message = yield  # type: ignore
+        # 强制开启 API 流式
+        request_kwargs = {
+            "model": self.config.model,
+            "messages": messages,
+            "max_tokens": MAX_COMPLETION_TOKENS,
+            "stream": True,
+        }
+        if True:  # 始终使用 JSON Schema
+            request_kwargs["response_format"] = GEO_JSON_SCHEMA
 
-        while True:
-            # 发送请求
-            response = self._send_request(
-                message,
-                previous_response_id=previous_response_id,
-                model=model,
-                thinking_enabled=thinking_enabled,
-            )
-            previous_response_id = response.id
+        if verbose:
+            print(f"       [DEBUG] 发送流式请求...")
 
-            # yield 响应并等待下一条消息
-            message = yield response
-            if message is None:
+        response_stream = self.client.chat.completions.create(**request_kwargs)
+
+        buffer = ""
+        decoder = json.JSONDecoder()
+
+        for chunk in response_stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content
+            if not delta:
+                continue
+
+            buffer += delta
+            if verbose:
+                # 简单打印进度点，避免刷屏
+                print(".", end="", flush=True)
+
+            # 尝试从 buffer 中解析完整的 JSON 对象
+            while True:
+                start_idx = buffer.find("{")
+                if start_idx == -1:
+                    # 没有对象开始符，保留 buffer 继续接收
+                    break
+
+                try:
+                    obj, end_idx = decoder.raw_decode(buffer, start_idx)
+
+                    # 校验是否是我们需要的学校对象
+                    if isinstance(obj, dict) and "school_name" in obj:
+                        yield obj
+                        # 解析成功，移除已解析部分
+                        buffer = buffer[end_idx:]
+                    else:
+                        # 跳过非目标对象（如 root 对象片段）
+                        buffer = buffer[start_idx + 1 :]
+
+                except json.JSONDecodeError:
+                    # 解析失败，等待更多数据
+                    break
+
+        if verbose:
+            print()  # 换行
+
+    def _extract_valid_objects(self, text: str) -> List[Dict[str, Any]]:
+        """尝试从不完整的 JSON 中提取有效的学校对象"""
+        objects = []
+        decoder = json.JSONDecoder()
+
+        # 寻找数组开始
+        # 可能是 {"schools": [ ... 或直接 [ ...
+        start_idx = text.find("[")
+        if start_idx == -1:
+            return []
+
+        idx = start_idx + 1
+
+        while idx < len(text):
+            # 跳过空白和逗号
+            while idx < len(text) and text[idx] in " \t\n\r,":
+                idx += 1
+
+            if idx >= len(text):
                 break
 
+            if text[idx] == "{":
+                try:
+                    obj, end_idx = decoder.raw_decode(text, idx)
+                    if isinstance(obj, dict) and "school_name" in obj:
+                        objects.append(obj)
+                    idx = end_idx
+                except json.JSONDecodeError:
+                    # 解析当前对象失败，说明可能被截断，停止
+                    break
+            elif text[idx] == "]":
+                # 数组结束
+                break
+            else:
+                # 其他字符，可能是截断导致的乱序，停止
+                break
 
-# 便捷函数
-def chat(message: str) -> str:
-    """快捷方式：单次对话"""
-    return Ai().chat_once(message)
-
-
-def extract_geo_info(text: str) -> List[Dict[str, Any]]:
-    """快捷方式：提取地理信息"""
-    return Ai().extract_geo_info(text)
-
-
-if __name__ == "__main__":
-    ai = Ai()
-
-    # 测试单次对话
-    response = ai.chat_once("你好，介绍一下自己")
-    print("单次对话:", response[:100])
+        return objects
