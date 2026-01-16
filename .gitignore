@@ -35,3 +35,5 @@ data/
 
 # Test files
 test*.py
+
+docs/
