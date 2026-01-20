@@ -1,0 +1,49 @@
+# 学区地图数据处理系统
+
+本项目用于将政府文件中的学区/施教区描述自动转为结构化数据，并生成可在地图中查看的多边形范围。
+
+## 功能概览
+- 多格式解析：PDF/图片/Word/Excel -> 纯文本
+- LLM 结构化提取：纯文本 -> 结构化 JSON
+- 粗略多边形生成：JSON -> GeoJSON（高德地理编码 + bbox 草稿）
+- Web 查看器：FastAPI + 高德 JS SDK
+
+## 目录结构
+- `app/data_trans`：文件解析与 LLM 结构化
+- `app/web`：FastAPI Web 服务与前端资源
+- `data/files`：原始文件
+- `data/outputs`：解析后的纯文本
+- `data/json`：LLM 结构化结果
+- `data/polygons`：生成的 GeoJSON 多边形
+- `scripts`：辅助脚本（导入 PostGIS、手动索引更新等）
+
+## 快速开始
+### 1) 解析原始文件
+```bash
+python main.py update
+```
+
+### 2) LLM 转换为 JSON
+```bash
+python main.py transform
+```
+
+### 3) 生成粗略多边形
+```bash
+python main.py polygon --key <AMAP_KEY>
+```
+
+### 4) 启动 Web 查看器
+```bash
+uvicorn app.web.main:app --host 0.0.0.0 --port 8000
+```
+
+## 环境变量
+- `ARK_API_KEY`：火山引擎 Ark LLM API Key
+- `AMAP_KEY`：高德 Web 服务 API Key（用于地理编码）
+- `AMAP_JS_KEY`：高德 JS API Key（用于前端地图）
+- `AMAP_SECURITY_JS_CODE`：高德安全密钥（如已开通）
+
+## 说明
+- `polygon` 生成的是草稿多边形，用于快速预览，后续建议人工修正。
+- 坐标系当前不做转换，前端直接使用原始坐标渲染。

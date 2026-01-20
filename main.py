@@ -5,12 +5,15 @@
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from app.data_trans import DataTrans
 from app.data_trans.ai import Ai, LLMParseError
@@ -20,6 +23,10 @@ INPUT_DIR = Path("data/files")
 OUTPUT_DIR = Path("data/outputs")
 JSON_DIR = Path("data/json")
 OUTPUT_FORMAT = ".txt"  # 输出文件格式 (纯文本内容)
+POLYGON_DIR = Path("data/polygons")
+GEOCODE_CACHE = Path("data/.geocode_cache.json")
+DEFAULT_CITY = "苏州"
+REQUEST_INTERVAL_SEC = 0.2
 
 
 def get_all_files(directory: Path) -> List[Path]:
@@ -465,6 +472,165 @@ def transform_single_file(
         traceback.print_exc()
 
 
+def load_geocode_cache() -> Dict[str, Tuple[float, float]]:
+    if GEOCODE_CACHE.exists():
+        return json.loads(GEOCODE_CACHE.read_text(encoding="utf-8"))
+    return {}
+
+
+def save_geocode_cache(cache: Dict[str, Tuple[float, float]]) -> None:
+    GEOCODE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    GEOCODE_CACHE.write_text(
+        json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def geocode_amap(
+    address: str,
+    city: str,
+    api_key: str,
+    cache: Dict[str, Tuple[float, float]],
+) -> Optional[Tuple[float, float]]:
+    cache_key = f"{city}:{address}"
+    if cache_key in cache:
+        return tuple(cache[cache_key])
+
+    params = {"key": api_key, "address": address, "city": city}
+    url = f"https://restapi.amap.com/v3/geocode/geo?{urlencode(params)}"
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    if data.get("status") != "1" or not data.get("geocodes"):
+        return None
+
+    location = data["geocodes"][0].get("location")
+    if not location:
+        return None
+
+    lng_str, lat_str = location.split(",")
+    lng, lat = float(lng_str), float(lat_str)
+    cache[cache_key] = (lng, lat)
+    return lng, lat
+
+
+def bbox_polygon(
+    points: List[Tuple[float, float]], buffer_deg: float = 0.002
+) -> Optional[List[List[float]]]:
+    if not points:
+        return None
+
+    lngs = [p[0] for p in points]
+    lats = [p[1] for p in points]
+    min_lng, max_lng = min(lngs), max(lngs)
+    min_lat, max_lat = min(lats), max(lats)
+
+    if min_lng == max_lng and min_lat == max_lat:
+        min_lng -= buffer_deg
+        max_lng += buffer_deg
+        min_lat -= buffer_deg
+        max_lat += buffer_deg
+
+    return [
+        [min_lng, min_lat],
+        [max_lng, min_lat],
+        [max_lng, max_lat],
+        [min_lng, max_lat],
+        [min_lng, min_lat],
+    ]
+
+
+def polygonize(
+    dry_run: bool = False,
+    city: str = DEFAULT_CITY,
+    api_key: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> None:
+    """
+    将 data/json 的结构化结果转换为粗略 polygon GeoJSON
+    """
+    api_key = api_key or os.getenv("AMAP_KEY")
+    if not api_key:
+        print("[FAIL] 缺少 AMAP_KEY，请设置环境变量或使用 --key")
+        return
+
+    POLYGON_DIR.mkdir(parents=True, exist_ok=True)
+    cache = load_geocode_cache()
+
+    files = sorted(JSON_DIR.glob("*.json"))
+    if limit:
+        files = files[:limit]
+
+    if not files:
+        print(f"[WARN] 未在 {JSON_DIR} 找到任何 JSON 文件")
+        return
+
+    if dry_run:
+        print("[DRY-RUN] 将要处理的文件:")
+        for f in files:
+            print(f"  - {f.name}")
+        return
+
+    for file_path in files:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+        schools = data.get("schools", [])
+
+        features = []
+        for school in schools:
+            points: List[Tuple[float, float]] = []
+
+            for b in school.get("boundaries", []):
+                name = b.get("name")
+                if name:
+                    pt = geocode_amap(name, city, api_key, cache)
+                    if pt:
+                        points.append(pt)
+                    time.sleep(REQUEST_INTERVAL_SEC)
+
+            for inc in school.get("includes", []):
+                name = inc.get("name")
+                if name:
+                    pt = geocode_amap(name, city, api_key, cache)
+                    if pt:
+                        points.append(pt)
+                    time.sleep(REQUEST_INTERVAL_SEC)
+
+            polygon = bbox_polygon(points)
+            if not polygon:
+                continue
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "school_name": school.get("school_name"),
+                        "source_file": file_path.name,
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [polygon],
+                    },
+                }
+            )
+
+        out_path = POLYGON_DIR / file_path.with_suffix(".geojson").name
+        geojson = {"type": "FeatureCollection", "features": features}
+        out_path.write_text(
+            json.dumps(geojson, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[OK] 生成: {out_path.name} (features: {len(features)})")
+
+    index_path = POLYGON_DIR / "index.json"
+    geojson_files = sorted([p.name for p in POLYGON_DIR.glob("*.geojson")])
+    index_path.write_text(
+        json.dumps(geojson_files, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"[OK] 更新索引: {index_path} (files: {len(geojson_files)})")
+
+    save_geocode_cache(cache)
+
+
 def main():
     """主入口函数"""
     parser = argparse.ArgumentParser(
@@ -480,6 +646,11 @@ def main():
   python main.py transform           # 转换所有文本到 data/json/
   python main.py transform --dry-run # 预览模式
   python main.py transform -v        # 详细模式
+
+  # 第三步：生成 polygon GeoJSON
+  python main.py polygon             # data/json -> data/polygons
+  python main.py polygon --dry-run   # 预览模式
+  python main.py polygon --key <AMAP_KEY>
 
   # 单文件操作
   python main.py update_single <file_path>
@@ -539,6 +710,19 @@ def main():
         "-f", "--force", action="store_true", help="强制覆盖已存在的文件"
     )
 
+    # polygon 子命令
+    polygon_parser = subparsers.add_parser(
+        "polygon", help="将 data/json 的结果生成粗略 polygon GeoJSON"
+    )
+    polygon_parser.add_argument(
+        "--dry-run", action="store_true", help="预览模式，只显示将要处理的文件"
+    )
+    polygon_parser.add_argument(
+        "--city", default=DEFAULT_CITY, help="地理编码城市 (默认: 苏州)"
+    )
+    polygon_parser.add_argument("--key", default=None, help="AMAP API Key")
+    polygon_parser.add_argument("--limit", type=int, default=None, help="限制处理文件数")
+
     args = parser.parse_args()
 
     if args.command == "update":
@@ -549,6 +733,13 @@ def main():
         update_single_file(args.file_path, verbose=args.verbose)
     elif args.command == "transform_single":
         transform_single_file(args.file_path, verbose=args.verbose, force=args.force)
+    elif args.command == "polygon":
+        polygonize(
+            dry_run=args.dry_run,
+            city=args.city,
+            api_key=args.key,
+            limit=args.limit,
+        )
     else:
         parser.print_help()
         sys.exit(1)

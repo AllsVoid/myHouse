@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GeoJSON 预览器</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="controls">
+    <label>选择文件：</label>
+    <select id="fileSelect">
+      <option value="">-- 请选择 --</option>
+    </select>
+    <button id="reloadBtn">重新加载当前文件</button>
+    <button id="refreshListBtn">刷新文件列表</button>
+    <span class="status" id="status">未加载</span>
+
+    <span class="spacer">或本地文件：</span>
+    <input id="fileInput" type="file" accept=".geojson,.json" />
+  </div>
+  <div id="map"></div>
+
+  {% if amap_security_js_code %}
+  <script>
+    window._AMapSecurityConfig = {
+      securityJsCode: "{{ amap_security_js_code }}"
+    };
+  </script>
+  {% endif %}
+  <script src="https://webapi.amap.com/maps?v=2.0&key={{ amap_key }}"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
