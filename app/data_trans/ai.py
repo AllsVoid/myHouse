@@ -7,9 +7,14 @@
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
+from dotenv import load_dotenv
 from volcenginesdkarkruntime import Ark
+
+# 加载项目根目录的 .env
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 
 # Token 阈值配置 (字符数估算，1个中文字符约等于1.5-2个token)
 MAX_CHARS_DIRECT = 8000  # 调小阈值，避免输出过长导致截断
@@ -239,10 +244,10 @@ class AiConfig:
             timeout: 请求超时时间（秒）
         """
         self.api_key = api_key or os.getenv("ARK_API_KEY", "")
-        self.base_url = base_url
-        self.model = model
+        self.base_url = os.getenv("ARK_BASE_URL", base_url)
+        self.model = os.getenv("ARK_MODEL", model)
         self.thinking_enabled = thinking_enabled
-        self.timeout = timeout
+        self.timeout = int(os.getenv("ARK_TIMEOUT", timeout))
 
     def validate(self) -> bool:
         """验证配置是否完整"""

@@ -15,12 +15,15 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
+# 加载项目根目录的 .env
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+
 try:
     import psycopg
 except Exception as e:
-    raise SystemExit(
-        "Missing dependency: psycopg. Install with `pip install psycopg`"
-    )
+    raise SystemExit("Missing dependency: psycopg. Install with `pip install psycopg`")
 
 DATA_DIR = Path("data/json")
 
@@ -112,7 +115,9 @@ def main() -> None:
                             year,
                             file_path.name,
                             json.dumps(school, ensure_ascii=False),
-                            json.dumps(school.get("boundaries", []), ensure_ascii=False),
+                            json.dumps(
+                                school.get("boundaries", []), ensure_ascii=False
+                            ),
                             json.dumps(school.get("includes", []), ensure_ascii=False),
                         ),
                     )

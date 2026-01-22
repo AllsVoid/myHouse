@@ -21,6 +21,11 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 
+from dotenv import load_dotenv
+
+# 加载项目根目录的 .env
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+
 INPUT_DIR = Path("data/json")
 OUTPUT_DIR = Path("data/polygons")
 CACHE_FILE = Path("data/.geocode_cache.json")
