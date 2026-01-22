@@ -12,3 +12,13 @@ body { margin: 0; font-family: Arial, sans-serif; }
 select, input[type="file"], button { padding: 6px 10px; }
 .status { color: #333; font-size: 14px; }
 .spacer { margin-left: 20px; }
+.point-marker {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff5722;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+.point-boundary { background: #ff5722; }
+.point-include { background: #1e88e5; }

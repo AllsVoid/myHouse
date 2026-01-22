@@ -27,6 +27,8 @@ POLYGON_DIR = Path("data/polygons")
 GEOCODE_CACHE = Path("data/.geocode_cache.json")
 DEFAULT_CITY = "苏州"
 REQUEST_INTERVAL_SEC = 0.2
+POINTS_DIR = Path("data/polygons/points")
+ITEM_POLYGON_DIR = Path("data/polygons/items")
 
 
 def get_all_files(directory: Path) -> List[Path]:
@@ -540,11 +542,82 @@ def bbox_polygon(
     ]
 
 
+def hull_polygon(
+    points: List[Tuple[float, float]],
+    method: str = "convex",
+    concave_ratio: float = 0.5,
+) -> Optional[List[List[float]]]:
+    if len(points) < 3:
+        return bbox_polygon(points)
+
+    try:
+        from shapely.geometry import MultiPoint
+    except Exception:
+        return bbox_polygon(points)
+
+    geom = MultiPoint(points)
+    hull = None
+
+    if method == "concave":
+        try:
+            from shapely import concave_hull
+
+            hull = concave_hull(geom, ratio=concave_ratio)
+        except Exception:
+            hull = None
+
+    if hull is None:
+        hull = geom.convex_hull
+
+    if hull is None or hull.is_empty:
+        return None
+
+    if hull.geom_type == "Polygon":
+        coords = list(hull.exterior.coords)
+        return [[float(x), float(y)] for x, y in coords]
+
+    if hull.geom_type == "MultiPolygon":
+        # 选面积最大的面
+        largest = max(hull.geoms, key=lambda g: g.area, default=None)
+        if largest is None:
+            return None
+        coords = list(largest.exterior.coords)
+        return [[float(x), float(y)] for x, y in coords]
+
+    return None
+
+
+def buffer_point_polygon(
+    point: Tuple[float, float], radius_m: float = 300.0
+) -> Optional[List[List[float]]]:
+    try:
+        from math import cos, radians
+
+        from shapely.geometry import Point
+    except Exception:
+        return None
+
+    lng, lat = point
+    scale_lat = 111000.0
+    scale_lng = 111000.0 * max(cos(radians(lat)), 1e-6)
+
+    pt_m = Point(lng * scale_lng, lat * scale_lat)
+    poly_m = pt_m.buffer(radius_m)
+    if poly_m.is_empty:
+        return None
+
+    coords = list(poly_m.exterior.coords)
+    return [[float(x / scale_lng), float(y / scale_lat)] for x, y in coords]
+
+
 def polygonize(
     dry_run: bool = False,
     city: str = DEFAULT_CITY,
     api_key: Optional[str] = None,
     limit: Optional[int] = None,
+    hull_method: str = "convex",
+    concave_ratio: float = 0.5,
+    item_buffer_m: float = 300.0,
 ) -> None:
     """
     将 data/json 的结构化结果转换为粗略 polygon GeoJSON
@@ -555,6 +628,8 @@ def polygonize(
         return
 
     POLYGON_DIR.mkdir(parents=True, exist_ok=True)
+    POINTS_DIR.mkdir(parents=True, exist_ok=True)
+    ITEM_POLYGON_DIR.mkdir(parents=True, exist_ok=True)
     cache = load_geocode_cache()
 
     files = sorted(JSON_DIR.glob("*.json"))
@@ -576,15 +651,30 @@ def polygonize(
         schools = data.get("schools", [])
 
         features = []
+        point_features = []
+        item_features = []
         for school in schools:
-            points: List[Tuple[float, float]] = []
+            boundary_points: List[Tuple[float, float]] = []
+            include_points: List[Tuple[float, float]] = []
 
             for b in school.get("boundaries", []):
                 name = b.get("name")
                 if name:
                     pt = geocode_amap(name, city, api_key, cache)
                     if pt:
-                        points.append(pt)
+                        boundary_points.append(pt)
+                        point_features.append(
+                            {
+                                "type": "Feature",
+                                "properties": {
+                                    "school_name": school.get("school_name"),
+                                    "source_file": file_path.name,
+                                    "kind": "boundary",
+                                    "name": name,
+                                },
+                                "geometry": {"type": "Point", "coordinates": list(pt)},
+                            }
+                        )
                     time.sleep(REQUEST_INTERVAL_SEC)
 
             for inc in school.get("includes", []):
@@ -592,10 +682,45 @@ def polygonize(
                 if name:
                     pt = geocode_amap(name, city, api_key, cache)
                     if pt:
-                        points.append(pt)
+                        include_points.append(pt)
+                        point_features.append(
+                            {
+                                "type": "Feature",
+                                "properties": {
+                                    "school_name": school.get("school_name"),
+                                    "source_file": file_path.name,
+                                    "kind": "include",
+                                    "name": name,
+                                },
+                                "geometry": {"type": "Point", "coordinates": list(pt)},
+                            }
+                        )
+                        item_polygon = buffer_point_polygon(pt, radius_m=item_buffer_m)
+                        if item_polygon:
+                            item_features.append(
+                                {
+                                    "type": "Feature",
+                                    "properties": {
+                                        "school_name": school.get("school_name"),
+                                        "source_file": file_path.name,
+                                        "kind": "include_area",
+                                        "name": name,
+                                    },
+                                    "geometry": {
+                                        "type": "Polygon",
+                                        "coordinates": [item_polygon],
+                                    },
+                                }
+                            )
                     time.sleep(REQUEST_INTERVAL_SEC)
 
-            polygon = bbox_polygon(points)
+            if hull_method != "convex":
+                print(
+                    f"[WARN] hull 方式已固定为 convex，忽略 {hull_method} (file: {file_path.name})"
+                )
+            polygon = hull_polygon(
+                include_points, method="convex", concave_ratio=concave_ratio
+            )
             if not polygon:
                 continue
 
@@ -619,6 +744,20 @@ def polygonize(
             json.dumps(geojson, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"[OK] 生成: {out_path.name} (features: {len(features)})")
+
+        points_path = POINTS_DIR / file_path.with_suffix(".points.geojson").name
+        points_geojson = {"type": "FeatureCollection", "features": point_features}
+        points_path.write_text(
+            json.dumps(points_geojson, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[OK] 输出点集: {points_path.name} (points: {len(point_features)})")
+
+        items_path = ITEM_POLYGON_DIR / file_path.with_suffix(".items.geojson").name
+        items_geojson = {"type": "FeatureCollection", "features": item_features}
+        items_path.write_text(
+            json.dumps(items_geojson, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[OK] 输出细分面: {items_path.name} (features: {len(item_features)})")
 
     index_path = POLYGON_DIR / "index.json"
     geojson_files = sorted([p.name for p in POLYGON_DIR.glob("*.geojson")])
@@ -722,6 +861,24 @@ def main():
     )
     polygon_parser.add_argument("--key", default=None, help="AMAP API Key")
     polygon_parser.add_argument("--limit", type=int, default=None, help="限制处理文件数")
+    polygon_parser.add_argument(
+        "--hull",
+        choices=["bbox", "convex", "concave"],
+        default="convex",
+        help="多边形生成方式 (默认: convex)",
+    )
+    polygon_parser.add_argument(
+        "--concave-ratio",
+        type=float,
+        default=0.5,
+        help="凹包收缩比例(0-1，越小越贴边，默认 0.5)",
+    )
+    polygon_parser.add_argument(
+        "--item-buffer-m",
+        type=float,
+        default=300.0,
+        help="细分面缓冲半径(米, 默认 300)",
+    )
 
     args = parser.parse_args()
 
@@ -739,6 +896,9 @@ def main():
             city=args.city,
             api_key=args.key,
             limit=args.limit,
+            hull_method=args.hull,
+            concave_ratio=args.concave_ratio,
+            item_buffer_m=args.item_buffer_m,
         )
     else:
         parser.print_help()
