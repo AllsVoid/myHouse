@@ -27,6 +27,15 @@ let originalPointsGeoJSON = null;
 let originalItemsGeoJSON = null;
 let currentFileName = null;
 let currentFileSource = 'server';
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const responseCache = {
+  polygons: new Map(),
+  points: new Map(),
+  items: new Map(),
+  historyList: new Map(),
+  historyItem: new Map(),
+  index: new Map()
+};
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -34,6 +43,34 @@ function setStatus(text) {
 
 function cloneGeoJSON(obj) {
   return obj ? JSON.parse(JSON.stringify(obj)) : null;
+}
+
+function cacheGet(map, key) {
+  if (!map) return null;
+  const entry = map.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > CACHE_TTL_MS) {
+    map.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function cacheSet(map, key, data) {
+  if (!map) return;
+  map.set(key, { ts: Date.now(), data });
+}
+
+async function fetchJsonWithCache(url, cacheMap, cacheKey, force = false) {
+  if (!force) {
+    const cached = cacheGet(cacheMap, cacheKey);
+    if (cached) return cached;
+  }
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`请求失败:${resp.status}`);
+  const data = await resp.json();
+  cacheSet(cacheMap, cacheKey, data);
+  return data;
 }
 
 function filterGeoJSONBySchool(geojson, schoolName) {
@@ -84,7 +121,7 @@ function isSchoolFilterActive() {
   return Boolean(getSelectedSchool());
 }
 
-async function loadHistoryList() {
+async function loadHistoryList(force = false) {
   if (!historySelect) return;
   if (!currentFileName || currentFileSource !== 'server') {
     setHistoryOptions([]);
@@ -96,9 +133,13 @@ async function loadHistoryList() {
     });
     const school = getSelectedSchool();
     if (school) params.set('school_name', school);
-    const resp = await fetch(`/api/history?${params.toString()}`);
-    if (!resp.ok) throw new Error('历史列表读取失败');
-    const items = await resp.json();
+    const cacheKey = params.toString();
+    const items = await fetchJsonWithCache(
+      `/api/history?${params.toString()}`,
+      responseCache.historyList,
+      cacheKey,
+      force
+    );
     setHistoryOptions(items);
   } catch (err) {
     setStatus('历史列表读取失败');
@@ -112,9 +153,11 @@ async function loadHistoryById(saveId) {
   disableAllEditing();
   clearAllLayers();
   try {
-    const resp = await fetch(`/api/history/${encodeURIComponent(saveId)}`);
-    if (!resp.ok) throw new Error('历史版本读取失败');
-    const data = await resp.json();
+    const data = await fetchJsonWithCache(
+      `/api/history/${encodeURIComponent(saveId)}`,
+      responseCache.historyItem,
+      saveId
+    );
     applyHistoryData(data, { asCurrent: false });
   } catch (err) {
     setStatus(`历史版本加载失败: ${err.message}`);
@@ -477,6 +520,13 @@ async function saveGeoJSON(kind, geojson) {
   if (!resp.ok) {
     throw new Error('保存失败');
   }
+  if (kind === 'points') {
+    cacheSet(responseCache.points, currentFileName, geojson);
+  } else if (kind === 'items') {
+    cacheSet(responseCache.items, currentFileName, geojson);
+  } else {
+    cacheSet(responseCache.polygons, currentFileName, geojson);
+  }
   setStatus('保存成功');
 }
 
@@ -496,7 +546,8 @@ async function saveCurrentToDatabase() {
     setStatus('已保存到数据库');
   }
   if (currentFileName && currentFileSource !== 'history') {
-    await loadHistoryList();
+    responseCache.historyList.clear();
+    await loadHistoryList(true);
   }
 }
 
@@ -594,14 +645,14 @@ function applySchoolFilter() {
   }
 }
 
-async function loadIndex() {
+async function loadIndex(force = false) {
   try {
-    const ts = Date.now();
-    const resp = await fetch(`/api/polygons?_=${ts}`, {
-      cache: 'no-store'
-    });
-    if (!resp.ok) throw new Error('文件列表读取失败');
-    const files = await resp.json();
+    const files = await fetchJsonWithCache(
+      '/api/polygons',
+      responseCache.index,
+      'index',
+      force
+    );
 
     fileSelect.innerHTML = '<option value="">-- 请选择 --</option>';
     files.forEach((f) => {
@@ -631,9 +682,11 @@ async function loadSelectedFile() {
   setStatus('加载中...');
   clearAllLayers();
   try {
-    const resp = await fetch(`/api/polygons/${encodeURIComponent(file)}`);
-    if (!resp.ok) throw new Error('文件读取失败');
-    const geojson = await resp.json();
+    const geojson = await fetchJsonWithCache(
+      `/api/polygons/${encodeURIComponent(file)}`,
+      responseCache.polygons,
+      file
+    );
     setSchoolOptions(geojson);
     renderGeoJSON(geojson, file);
     if (showPointsCheckbox.checked) {
@@ -650,15 +703,20 @@ async function loadSelectedFile() {
 
 async function loadPointsForFile(file) {
   try {
-    const resp = await fetch(`/api/points/${encodeURIComponent(file)}`);
-    if (!resp.ok) {
-      if (resp.status === 404) {
+    let geojson = null;
+    try {
+      geojson = await fetchJsonWithCache(
+        `/api/points/${encodeURIComponent(file)}`,
+        responseCache.points,
+        file
+      );
+    } catch (err) {
+      if (err?.message && err.message.includes('404')) {
         setStatus('点集文件不存在（请先生成 points 文件）');
         return;
       }
-      throw new Error('点集文件读取失败');
+      throw err;
     }
-    const geojson = await resp.json();
     originalPointsGeoJSON = cloneGeoJSON(geojson);
     const filtered = filterGeoJSONBySchool(geojson, getSelectedSchool());
     renderPointsGeoJSON(filtered, file, { skipOriginal: true });
@@ -669,15 +727,20 @@ async function loadPointsForFile(file) {
 
 async function loadItemsForFile(file) {
   try {
-    const resp = await fetch(`/api/items/${encodeURIComponent(file)}`);
-    if (!resp.ok) {
-      if (resp.status === 404) {
+    let geojson = null;
+    try {
+      geojson = await fetchJsonWithCache(
+        `/api/items/${encodeURIComponent(file)}`,
+        responseCache.items,
+        file
+      );
+    } catch (err) {
+      if (err?.message && err.message.includes('404')) {
         setStatus('细分面文件不存在（请先生成 items 文件）');
         return;
       }
-      throw new Error('细分面文件读取失败');
+      throw err;
     }
-    const geojson = await resp.json();
     originalItemsGeoJSON = cloneGeoJSON(geojson);
     const filtered = filterGeoJSONBySchool(geojson, getSelectedSchool());
     renderItemsGeoJSON(filtered, file, { skipOriginal: true });
@@ -700,7 +763,7 @@ function initMap() {
 
 fileSelect.addEventListener('change', loadSelectedFile);
 reloadBtn.addEventListener('click', loadSelectedFile);
-refreshListBtn.addEventListener('click', loadIndex);
+refreshListBtn.addEventListener('click', () => loadIndex(true));
   showPointsCheckbox.addEventListener('change', () => {
     if (showPointsCheckbox.checked) {
       if (fileSelect.value) {

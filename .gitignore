@@ -37,3 +37,5 @@ data/
 test*.py
 
 docs/
+
+*.patch

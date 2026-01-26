@@ -3,11 +3,12 @@
 import json
 import os
 from datetime import datetime, timezone
+from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
@@ -56,6 +57,58 @@ def _write_geojson_file(path: Path, data: dict) -> None:
             backup_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     path.write_text(payload, encoding="utf-8")
+
+
+def _get_file_cache_headers(path: Path) -> tuple[str, datetime, dict]:
+    stat = path.stat()
+    etag = f'W/"{stat.st_mtime_ns}-{stat.st_size}"'
+    last_modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+    headers = {
+        "ETag": etag,
+        "Last-Modified": format_datetime(last_modified, usegmt=True),
+        "Cache-Control": "public, max-age=86400",
+    }
+    return etag, last_modified, headers
+
+
+def _get_dir_cache_headers(dir_path: Path, pattern: str = "*.geojson") -> tuple[str, datetime, dict]:
+    latest_mtime_ns = 0
+    file_count = 0
+    for path in dir_path.glob(pattern):
+        if not path.is_file():
+            continue
+        file_count += 1
+        mtime_ns = path.stat().st_mtime_ns
+        if mtime_ns > latest_mtime_ns:
+            latest_mtime_ns = mtime_ns
+    if latest_mtime_ns == 0:
+        last_modified = datetime.fromtimestamp(0, tz=timezone.utc)
+    else:
+        last_modified = datetime.fromtimestamp(latest_mtime_ns / 1e9, tz=timezone.utc)
+    etag = f'W/"{latest_mtime_ns}-{file_count}"'
+    headers = {
+        "ETag": etag,
+        "Last-Modified": format_datetime(last_modified, usegmt=True),
+        "Cache-Control": "public, max-age=86400",
+    }
+    return etag, last_modified, headers
+
+
+def _is_not_modified(request: Request, etag: str, last_modified: datetime) -> bool:
+    inm = request.headers.get("if-none-match")
+    if inm and inm == etag:
+        return True
+    ims = request.headers.get("if-modified-since")
+    if ims:
+        try:
+            ims_dt = parsedate_to_datetime(ims)
+            if ims_dt.tzinfo is None:
+                ims_dt = ims_dt.replace(tzinfo=timezone.utc)
+            if last_modified <= ims_dt:
+                return True
+        except Exception:
+            return False
+    return False
 
 
 def _ensure_geojson_table(conn) -> None:
@@ -113,19 +166,26 @@ def index(request: Request):
 
 
 @app.get("/api/polygons", response_model=List[str])
-def list_polygons() -> List[str]:
+def list_polygons(request: Request) -> List[str]:
     if not POLYGON_DIR.exists():
         return []
-    return sorted([p.name for p in POLYGON_DIR.glob("*.geojson")])
+    etag, last_modified, headers = _get_dir_cache_headers(POLYGON_DIR)
+    if _is_not_modified(request, etag, last_modified):
+        return Response(status_code=304, headers=headers)
+    response = sorted([p.name for p in POLYGON_DIR.glob("*.geojson")])
+    return Response(content=json.dumps(response, ensure_ascii=False), media_type="application/json", headers=headers)
 
 
 @app.get("/api/polygons/{filename}")
-def get_polygon(filename: str):
+def get_polygon(request: Request, filename: str):
     _validate_filename(filename)
     path = POLYGON_DIR / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(str(path), media_type="application/json")
+    etag, last_modified, headers = _get_file_cache_headers(path)
+    if _is_not_modified(request, etag, last_modified):
+        return Response(status_code=304, headers=headers)
+    return FileResponse(str(path), media_type="application/json", headers=headers)
 
 
 @app.post("/api/polygons/{filename}")
@@ -401,7 +461,7 @@ def get_history(save_id: str):
 
 
 @app.get("/api/points/{filename}")
-def get_points(filename: str):
+def get_points(request: Request, filename: str):
     _validate_filename(filename)
     if filename.endswith(".geojson"):
         points_name = filename[: -len(".geojson")] + ".points.geojson"
@@ -410,7 +470,10 @@ def get_points(filename: str):
     path = POINTS_DIR / points_name
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(str(path), media_type="application/json")
+    etag, last_modified, headers = _get_file_cache_headers(path)
+    if _is_not_modified(request, etag, last_modified):
+        return Response(status_code=304, headers=headers)
+    return FileResponse(str(path), media_type="application/json", headers=headers)
 
 
 @app.post("/api/points/{filename}")
@@ -429,7 +492,7 @@ async def save_points(filename: str, request: Request):
 
 
 @app.get("/api/items/{filename}")
-def get_items(filename: str):
+def get_items(request: Request, filename: str):
     _validate_filename(filename)
     if filename.endswith(".geojson"):
         items_name = filename[: -len(".geojson")] + ".items.geojson"
@@ -438,6 +501,9 @@ def get_items(filename: str):
     path = ITEMS_DIR / items_name
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(str(path), media_type="application/json")
+    etag, last_modified, headers = _get_file_cache_headers(path)
+    if _is_not_modified(request, etag, last_modified):
+        return Response(status_code=304, headers=headers)
+    return FileResponse(str(path), media_type="application/json", headers=headers)
 
 
