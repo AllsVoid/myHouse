@@ -6,23 +6,22 @@ const fileInput = document.getElementById('fileInput');
 const reloadBtn = document.getElementById('reloadBtn');
 const refreshListBtn = document.getElementById('refreshListBtn');
 const schoolSelect = document.getElementById('schoolSelect');
+const historySelect = document.getElementById('historySelect');
+const restoreHistoryBtn = document.getElementById('restoreHistoryBtn');
 const showPointsCheckbox = document.getElementById('showPoints');
 const showItemsCheckbox = document.getElementById('showItems');
 const editPolygonBtn = document.getElementById('editPolygonBtn');
 const savePolygonBtn = document.getElementById('savePolygonBtn');
 const editPointsBtn = document.getElementById('editPointsBtn');
 const savePointsBtn = document.getElementById('savePointsBtn');
-const editItemsBtn = document.getElementById('editItemsBtn');
-const saveItemsBtn = document.getElementById('saveItemsBtn');
+const saveDbBtn = document.getElementById('saveDbBtn');
 const resetEditsBtn = document.getElementById('resetEditsBtn');
 let currentPolygonLayer = null;
 let currentPointsLayer = null;
 let currentItemsLayer = null;
 let polygonEditors = [];
-let itemsEditors = [];
 let isPolygonEditing = false;
 let isPointsEditing = false;
-let isItemsEditing = false;
 let originalPolygonGeoJSON = null;
 let originalPointsGeoJSON = null;
 let originalItemsGeoJSON = null;
@@ -64,12 +63,115 @@ function setSchoolOptions(geojson) {
   });
 }
 
+function setHistoryOptions(items) {
+  if (!historySelect) return;
+  historySelect.innerHTML = '<option value="">当前</option>';
+  if (!items || !items.length) return;
+  items.forEach((item) => {
+    const opt = document.createElement('option');
+    opt.value = item.save_id;
+    const time = item.saved_at ? new Date(item.saved_at).toLocaleString('zh-CN') : '未知时间';
+    opt.textContent = time;
+    historySelect.appendChild(opt);
+  });
+}
+
 function getSelectedSchool() {
   return schoolSelect ? schoolSelect.value : '';
 }
 
 function isSchoolFilterActive() {
   return Boolean(getSelectedSchool());
+}
+
+async function loadHistoryList() {
+  if (!historySelect) return;
+  if (!currentFileName || currentFileSource !== 'server') {
+    setHistoryOptions([]);
+    return;
+  }
+  try {
+    const params = new URLSearchParams({
+      file_name: currentFileName
+    });
+    const school = getSelectedSchool();
+    if (school) params.set('school_name', school);
+    const resp = await fetch(`/api/history?${params.toString()}`);
+    if (!resp.ok) throw new Error('历史列表读取失败');
+    const items = await resp.json();
+    setHistoryOptions(items);
+  } catch (err) {
+    setStatus('历史列表读取失败');
+    setHistoryOptions([]);
+  }
+}
+
+async function loadHistoryById(saveId) {
+  if (!saveId) return;
+  setStatus('加载历史版本中...');
+  disableAllEditing();
+  clearAllLayers();
+  try {
+    const resp = await fetch(`/api/history/${encodeURIComponent(saveId)}`);
+    if (!resp.ok) throw new Error('历史版本读取失败');
+    const data = await resp.json();
+    applyHistoryData(data, { asCurrent: false });
+  } catch (err) {
+    setStatus(`历史版本加载失败: ${err.message}`);
+  }
+}
+
+function applyHistoryData(data, options = {}) {
+  const asCurrent = Boolean(options.asCurrent);
+  currentFileName = data.file_name || currentFileName;
+  currentFileSource = asCurrent ? 'server' : 'history';
+  if (schoolSelect) {
+    schoolSelect.value = data.school_name || '';
+  }
+  clearAllLayers();
+  if (data.polygons) {
+    renderGeoJSON(
+      data.polygons,
+      `${currentFileName} (${asCurrent ? '恢复' : '历史'})`,
+      { skipOriginal: !asCurrent }
+    );
+  } else {
+    clearPolygonLayer();
+  }
+  if (showPointsCheckbox.checked && data.points) {
+    renderPointsGeoJSON(
+      data.points,
+      `${currentFileName} (${asCurrent ? '恢复' : '历史'})`,
+      { skipOriginal: !asCurrent }
+    );
+  } else {
+    clearPointsLayer();
+  }
+  clearItemsLayer();
+  if (showItemsCheckbox.checked) {
+    setStatus('历史版本不包含细分面');
+  }
+  if (asCurrent && historySelect) {
+    historySelect.value = '';
+  }
+}
+
+async function restoreHistoryAsCurrent() {
+  if (!historySelect || !historySelect.value) {
+    setStatus('请先选择一个历史版本');
+    return;
+  }
+  setStatus('正在恢复历史版本...');
+  try {
+    const resp = await fetch(`/api/history/${encodeURIComponent(historySelect.value)}`);
+    if (!resp.ok) throw new Error('历史版本读取失败');
+    const data = await resp.json();
+    applyHistoryData(data, { asCurrent: true });
+    setStatus('已恢复为当前版本，可继续编辑并保存');
+    await loadHistoryList();
+  } catch (err) {
+    setStatus(`恢复失败: ${err.message}`);
+  }
 }
 
 function clearPolygonLayer() {
@@ -106,13 +208,6 @@ function closePolygonEditors() {
   editPolygonBtn.textContent = '编辑面';
 }
 
-function closeItemsEditors() {
-  itemsEditors.forEach((editor) => editor.close());
-  itemsEditors = [];
-  isItemsEditing = false;
-  editItemsBtn.textContent = '编辑细分面';
-}
-
 function setMarkersDraggable(overlays, draggable) {
   if (!overlays) return;
   overlays.forEach((overlay) => {
@@ -124,7 +219,6 @@ function setMarkersDraggable(overlays, draggable) {
 
 function disableAllEditing() {
   closePolygonEditors();
-  closeItemsEditors();
   if (isPointsEditing) {
     setMarkersDraggable(currentPointsLayer, false);
     isPointsEditing = false;
@@ -386,6 +480,26 @@ async function saveGeoJSON(kind, geojson) {
   setStatus('保存成功');
 }
 
+async function saveCurrentToDatabase() {
+  setStatus('正在保存全部数据到数据库...');
+  const resp = await fetch('/api/save_all', { method: 'POST' });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    setStatus(`保存失败: ${detail}`);
+    return;
+  }
+  const result = await resp.json();
+  const errCount = result?.errors?.length || 0;
+  if (errCount) {
+    setStatus(`已保存到数据库，但有 ${errCount} 个文件失败`);
+  } else {
+    setStatus('已保存到数据库');
+  }
+  if (currentFileName && currentFileSource !== 'history') {
+    await loadHistoryList();
+  }
+}
+
 function togglePolygonEditing() {
   if (!currentPolygonLayer || !currentPolygonLayer.length) {
     setStatus('未加载面数据，无法编辑');
@@ -429,34 +543,6 @@ function togglePointsEditing() {
   setStatus(isPointsEditing ? '点编辑已开启' : '点编辑已关闭');
 }
 
-function toggleItemsEditing() {
-  if (!currentItemsLayer || !currentItemsLayer.length) {
-    setStatus('未加载细分面，无法编辑');
-    return;
-  }
-  if (isSchoolFilterActive()) {
-    setStatus('请先切换到全部校区再编辑');
-    return;
-  }
-  if (isItemsEditing) {
-    closeItemsEditors();
-    return;
-  }
-  AMap.plugin(['AMap.PolyEditor'], () => {
-    closeItemsEditors();
-    currentItemsLayer.forEach((overlay) => {
-      if (overlay instanceof AMap.Polygon) {
-        const editor = new AMap.PolyEditor(map, overlay);
-        editor.open();
-        itemsEditors.push(editor);
-      }
-    });
-    isItemsEditing = true;
-    editItemsBtn.textContent = '结束编辑细分面';
-    setStatus('细分面编辑已开启');
-  });
-}
-
 function resetEdits() {
   disableAllEditing();
   if (currentFileSource === 'server') {
@@ -477,6 +563,10 @@ function resetEdits() {
 }
 
 function applySchoolFilter() {
+  if (historySelect && historySelect.value) {
+    setStatus('历史版本模式下无法筛选');
+    return;
+  }
   const school = getSelectedSchool();
   if (originalPolygonGeoJSON) {
     const filtered = filterGeoJSONBySchool(originalPolygonGeoJSON, school);
@@ -535,6 +625,9 @@ async function loadSelectedFile() {
   if (schoolSelect) {
     schoolSelect.value = '';
   }
+  if (historySelect) {
+    historySelect.value = '';
+  }
   setStatus('加载中...');
   clearAllLayers();
   try {
@@ -549,6 +642,7 @@ async function loadSelectedFile() {
     if (showItemsCheckbox.checked) {
       await loadItemsForFile(file);
     }
+    await loadHistoryList();
   } catch (err) {
     setStatus(`加载失败: ${err.message}`);
   }
@@ -604,9 +698,9 @@ function initMap() {
   });
   infoWindow = new AMap.InfoWindow({ offset: new AMap.Pixel(0, -20) });
 
-  fileSelect.addEventListener('change', loadSelectedFile);
-  reloadBtn.addEventListener('click', loadSelectedFile);
-  refreshListBtn.addEventListener('click', loadIndex);
+fileSelect.addEventListener('change', loadSelectedFile);
+reloadBtn.addEventListener('click', loadSelectedFile);
+refreshListBtn.addEventListener('click', loadIndex);
   showPointsCheckbox.addEventListener('change', () => {
     if (showPointsCheckbox.checked) {
       if (fileSelect.value) {
@@ -664,59 +758,65 @@ function initMap() {
     }
   });
 
-  editItemsBtn.addEventListener('click', toggleItemsEditing);
-  saveItemsBtn.addEventListener('click', async () => {
-    try {
-      if (isSchoolFilterActive()) {
-        setStatus('请先切换到全部校区再保存');
-        return;
-      }
-      if (!currentItemsLayer || !currentItemsLayer.length) {
-        setStatus('未加载细分面，无法保存');
-        return;
-      }
-      const geojson = overlaysToGeoJSON(currentItemsLayer, 'Polygon');
-      await saveGeoJSON('items', geojson);
-      originalItemsGeoJSON = cloneGeoJSON(geojson);
-    } catch (err) {
+  saveDbBtn.addEventListener('click', () => {
+    saveCurrentToDatabase().catch((err) => {
       setStatus(`保存失败: ${err.message}`);
-    }
+    });
   });
 
   resetEditsBtn.addEventListener('click', resetEdits);
   if (schoolSelect) {
     schoolSelect.addEventListener('change', () => {
       disableAllEditing();
+      if (historySelect) {
+        historySelect.value = '';
+      }
       applySchoolFilter();
+      loadHistoryList();
+    });
+  }
+  if (historySelect) {
+    historySelect.addEventListener('change', () => {
+      disableAllEditing();
+      if (!historySelect.value) {
+        currentFileSource = 'server';
+        loadSelectedFile();
+        return;
+      }
+      loadHistoryById(historySelect.value);
     });
   }
 
-  fileInput.addEventListener('change', (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const geojson = JSON.parse(reader.result);
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const geojson = JSON.parse(reader.result);
         currentFileName = file.name;
         currentFileSource = 'local';
         disableAllEditing();
       if (schoolSelect) {
         schoolSelect.value = '';
       }
+        if (historySelect) {
+          historySelect.value = '';
+          setHistoryOptions([]);
+        }
         clearAllLayers();
       setSchoolOptions(geojson);
-        renderGeoJSON(geojson, file.name);
-      } catch (err) {
-        setStatus('本地文件解析失败');
-      }
-    };
-    reader.readAsText(file, 'utf-8');
-  });
+      renderGeoJSON(geojson, file.name);
+    } catch (err) {
+      setStatus('本地文件解析失败');
+    }
+  };
+  reader.readAsText(file, 'utf-8');
+});
 
-  // 初始化加载文件列表
-  loadIndex();
+// 初始化加载文件列表
+loadIndex();
 }
 
 document.addEventListener('DOMContentLoaded', initMap);
