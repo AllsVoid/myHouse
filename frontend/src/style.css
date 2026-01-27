@@ -173,10 +173,40 @@ button {
   flex-direction: column;
   gap: 8px;
 }
-.image-preview img {
-  max-width: 260px;
-  border-radius: 8px;
+.image-preview-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.image-thumb {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  padding: 0;
   border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #ffffff;
+  cursor: zoom-in;
+}
+.image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.image-index {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  background: rgba(15, 23, 42, 0.7);
+  color: #ffffff;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+.image-actions {
+  display: flex;
+  gap: 8px;
 }
 .form-actions {
   display: flex;
@@ -219,6 +249,16 @@ button {
   max-width: 220px;
   border-radius: 8px;
   border: 1px solid #e5e7eb;
+  cursor: zoom-in;
+}
+.house-image .ghost-link {
+  margin-top: 6px;
+  display: inline-block;
+}
+.image-count {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #6b7280;
 }
 .house-actions {
   display: flex;
@@ -290,4 +330,70 @@ button {
 }
 .map-container {
   flex: 1;
+}
+.image-viewer {
+  width: min(900px, 96vw);
+  height: min(680px, 90vh);
+}
+.image-viewer-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: #f8fafc;
+  position: relative;
+}
+.image-viewer-body img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 12px;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
+  transition: transform 0.2s ease;
+}
+.nav-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(15, 23, 42, 0.35);
+  color: #ffffff;
+  font-size: 28px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.nav-arrow.left { left: 16px; }
+.nav-arrow.right { right: 16px; }
+.viewer-footer {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(8px);
+  font-size: 12px;
+  color: #1f2933;
+}
+.viewer-rotate {
+  display: flex;
+  gap: 8px;
+}
+.viewer-rotate button {
+  border: none;
+  background: rgba(15, 23, 42, 0.2);
+  color: #1f2933;
+  padding: 4px 8px;
+  border-radius: 10px;
+  cursor: pointer;
 }

@@ -7,10 +7,22 @@ const showForm = ref(false)
 const editingId = ref(null)
 const isSaving = ref(false)
 const errorMessage = ref('')
-const layoutImagePreview = ref('')
+const layoutImages = ref([])
 const layoutImageType = ref('')
 const fileInputRef = ref(null)
 const showMap = ref(false)
+const showImageViewer = ref(false)
+const viewerImages = ref([])
+const viewerIndex = ref(0)
+const viewerImageTitle = ref('')
+const viewerScale = ref(1)
+const viewerRotate = ref(0)
+const viewerContainerRef = ref(null)
+let touchStartX = 0
+let touchStartY = 0
+let touchStartDistance = 0
+let touchStartScale = 1
+let isPinching = false
 const mapLoading = ref(false)
 const mapError = ref('')
 const mapRef = ref(null)
@@ -75,7 +87,7 @@ function resetForm() {
   form.houseCode = ''
   form.link = ''
   form.note = ''
-  layoutImagePreview.value = ''
+  layoutImages.value = []
   layoutImageType.value = ''
 }
 
@@ -99,7 +111,11 @@ function openEdit(item) {
   form.usage = item.usage || ''
   form.houseCode = item.houseCode || ''
   form.link = item.link || ''
-  layoutImagePreview.value = item.layoutImageData || ''
+  layoutImages.value = item.layoutImages?.length
+    ? [...item.layoutImages]
+    : item.layoutImageData
+      ? [item.layoutImageData]
+      : []
   layoutImageType.value = item.layoutImageType || ''
   form.note = item.note || ''
   showForm.value = true
@@ -131,7 +147,8 @@ async function submitForm() {
     usage: form.usage.trim(),
     houseCode: form.houseCode.trim(),
     link: form.link.trim(),
-    layoutImageData: layoutImagePreview.value,
+    layoutImages: layoutImages.value,
+    layoutImageData: layoutImages.value[0] || '',
     layoutImageType: layoutImageType.value,
     note: form.note.trim()
   }
@@ -159,6 +176,7 @@ async function submitForm() {
       const created = await resp.json()
       houses.value.unshift(created)
     }
+    await refreshMapCache()
     closeForm()
   } catch (err) {
     errorMessage.value = err.message || '保存失败'
@@ -173,6 +191,7 @@ async function deleteHouse(item) {
     const resp = await fetch(`/api/houses/${item.id}`, { method: 'DELETE' })
     if (!resp.ok) throw new Error('删除失败')
     houses.value = houses.value.filter((h) => h.id !== item.id)
+    await refreshMapCache()
   } catch (err) {
     errorMessage.value = err.message || '删除失败'
   }
@@ -223,9 +242,13 @@ async function ensureAmapLoaded() {
 }
 
 async function fetchHouseGeoJson() {
+  if (mapCache.value.data) {
+    return mapCache.value.data
+  }
   const resp = await fetch('/api/houses/geojson')
   if (!resp.ok) throw new Error('房源地图数据加载失败')
   const data = await resp.json()
+  mapCache.value.data = data
   return data
 }
 
@@ -240,6 +263,17 @@ function formatPrice(value) {
   if (value === '' || value === null || value === undefined) return '-'
   const num = Number(value)
   return Number.isFinite(num) ? `${num.toFixed(2)} 万元` : '-'
+}
+
+function getItemImages(item) {
+  if (!item) return []
+  if (Array.isArray(item.layoutImages) && item.layoutImages.length) {
+    return item.layoutImages
+  }
+  if (item.layoutImageData) {
+    return [item.layoutImageData]
+  }
+  return []
 }
 
 function renderHousesOnMap(geojson) {
@@ -327,6 +361,143 @@ function closeMap() {
   }
 }
 
+function openImageViewer(images, index, title) {
+  if (!images?.length) return
+  viewerImages.value = images
+  viewerIndex.value = index || 0
+  viewerImageTitle.value = title || '户型图'
+  viewerScale.value = 1
+  viewerRotate.value = 0
+  showImageViewer.value = true
+  nextTick(() => {
+    viewerContainerRef.value?.focus()
+  })
+}
+
+function closeImageViewer() {
+  showImageViewer.value = false
+  viewerImages.value = []
+  viewerIndex.value = 0
+  viewerImageTitle.value = ''
+  viewerScale.value = 1
+  viewerRotate.value = 0
+}
+
+function viewerPrev() {
+  if (!viewerImages.value.length) return
+  viewerIndex.value =
+    (viewerIndex.value - 1 + viewerImages.value.length) % viewerImages.value.length
+}
+
+function viewerNext() {
+  if (!viewerImages.value.length) return
+  viewerIndex.value = (viewerIndex.value + 1) % viewerImages.value.length
+}
+
+function zoomIn() {
+  viewerScale.value = Math.min(3, viewerScale.value + 0.2)
+}
+
+function zoomOut() {
+  viewerScale.value = Math.max(0.4, viewerScale.value - 0.2)
+}
+
+function rotateLeft() {
+  viewerRotate.value -= 90
+}
+
+function rotateRight() {
+  viewerRotate.value += 90
+}
+
+function handleKeydown(event) {
+  if (!showImageViewer.value) return
+  if (event.key === 'ArrowLeft') {
+    viewerPrev()
+  } else if (event.key === 'ArrowRight') {
+    viewerNext()
+  } else if (event.key === '+' || event.key === '=') {
+    zoomIn()
+  } else if (event.key === '-') {
+    zoomOut()
+  } else if (event.key === 'Escape') {
+    closeImageViewer()
+  }
+}
+
+function handleWheel(event) {
+  if (!showImageViewer.value) return
+  if (event.deltaY < 0) {
+    zoomIn()
+  } else {
+    zoomOut()
+  }
+}
+
+function getDistance(touches) {
+  const [a, b] = touches
+  const dx = a.clientX - b.clientX
+  const dy = a.clientY - b.clientY
+  return Math.hypot(dx, dy)
+}
+
+function handleTouchStart(event) {
+  if (!showImageViewer.value) return
+  if (event.touches.length === 2) {
+    isPinching = true
+    touchStartDistance = getDistance(event.touches)
+    touchStartScale = viewerScale.value
+  } else if (event.touches.length === 1) {
+    isPinching = false
+    touchStartX = event.touches[0].clientX
+    touchStartY = event.touches[0].clientY
+  }
+}
+
+function handleTouchMove(event) {
+  if (!showImageViewer.value) return
+  if (event.touches.length === 2) {
+    const distance = getDistance(event.touches)
+    const scale = touchStartScale * (distance / touchStartDistance)
+    viewerScale.value = Math.min(3, Math.max(0.4, scale))
+  }
+}
+
+function handleTouchEnd(event) {
+  if (!showImageViewer.value) return
+  if (isPinching) {
+    if (event.touches.length === 0) {
+      isPinching = false
+    }
+    return
+  }
+  if (event.changedTouches.length !== 1) return
+  const dx = event.changedTouches[0].clientX - touchStartX
+  const dy = event.changedTouches[0].clientY - touchStartY
+  if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+    if (dx > 0) {
+      viewerPrev()
+    } else {
+      viewerNext()
+    }
+  }
+}
+
+async function refreshMapCache() {
+  mapCache.value.data = null
+  if (!showMap.value) return
+  mapLoading.value = true
+  mapError.value = ''
+  try {
+    const geojson = await fetchHouseGeoJson()
+    renderHousesOnMap(geojson)
+  } catch (err) {
+    mapError.value = err.message || '地图加载失败'
+  } finally {
+    mapLoading.value = false
+  }
+}
+
 function readImageFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -337,11 +508,13 @@ function readImageFile(file) {
 }
 
 async function handleImageChange(event) {
-  const file = event.target.files?.[0]
-  if (!file) return
-  const dataUrl = await readImageFile(file)
-  layoutImagePreview.value = dataUrl
-  layoutImageType.value = file.type || 'image'
+  const files = Array.from(event.target.files || [])
+  if (!files.length) return
+  for (const file of files) {
+    const dataUrl = await readImageFile(file)
+    layoutImages.value.push(dataUrl)
+    layoutImageType.value = file.type || 'image'
+  }
   event.target.value = ''
 }
 
@@ -352,12 +525,16 @@ async function handlePaste(event) {
   const file = imageItem.getAsFile()
   if (!file) return
   const dataUrl = await readImageFile(file)
-  layoutImagePreview.value = dataUrl
+  layoutImages.value.push(dataUrl)
   layoutImageType.value = file.type || 'image'
 }
 
+function removeImage(index) {
+  layoutImages.value.splice(index, 1)
+}
+
 function clearImage() {
-  layoutImagePreview.value = ''
+  layoutImages.value = []
   layoutImageType.value = ''
 }
 
@@ -454,6 +631,7 @@ function triggerFilePicker(event) {
             class="file-input-hidden"
             type="file"
             accept="image/*"
+            multiple
             @change="handleImageChange"
           />
           <div
@@ -465,9 +643,22 @@ function triggerFilePicker(event) {
             <button type="button" class="plus-btn" @click="triggerFilePicker">+</button>
             <span>点击虚线区域粘贴剪切板图片 (Ctrl/Cmd + V)</span>
           </div>
-          <div v-if="layoutImagePreview" class="image-preview">
-            <img :src="layoutImagePreview" alt="户型图预览" />
-            <button type="button" class="ghost-link" @click="clearImage">清除图片</button>
+          <div v-if="layoutImages.length" class="image-preview">
+            <div class="image-preview-grid">
+              <button
+                v-for="(img, idx) in layoutImages"
+                :key="img + idx"
+                class="image-thumb"
+                type="button"
+                @click="openImageViewer(layoutImages, idx, form.name)"
+              >
+                <img :src="img" alt="户型图预览" />
+                <span class="image-index">{{ idx + 1 }}</span>
+              </button>
+            </div>
+            <div class="image-actions">
+              <button type="button" class="ghost-link" @click="clearImage">清空图片</button>
+            </div>
           </div>
         </div>
         <div class="form-row">
@@ -498,8 +689,13 @@ function triggerFilePicker(event) {
             <span v-if="item.building">{{ item.building }}</span>
             <span v-if="item.floor">{{ item.floor }}</span>
           </div>
-          <div v-if="item.layoutImageData" class="house-image">
-            <img :src="item.layoutImageData" alt="户型图" />
+          <div v-if="getItemImages(item).length" class="house-image">
+            <img
+              :src="getItemImages(item)[0]"
+              alt="户型图"
+              @click="openImageViewer(getItemImages(item), 0, item.name)"
+            />
+            <span class="image-count">共 {{ getItemImages(item).length }} 张</span>
           </div>
           <p class="house-note">{{ item.note || '—' }}</p>
         </div>
@@ -521,6 +717,43 @@ function triggerFilePicker(event) {
         <div v-if="mapError" class="map-error">{{ mapError }}</div>
         <div v-if="mapLoading" class="map-loading">地图加载中...</div>
         <div ref="mapRef" class="map-container"></div>
+      </div>
+    </div>
+
+    <div v-if="showImageViewer" class="map-modal" @click.self="closeImageViewer">
+      <div
+        ref="viewerContainerRef"
+        class="map-card image-viewer"
+        tabindex="0"
+        @keydown="handleKeydown"
+      >
+        <header class="map-header">
+          <div>
+            <h2>{{ viewerImageTitle }}</h2>
+            <p>户型图预览</p>
+          </div>
+          <button type="button" class="ghost-link" @click="closeImageViewer">关闭</button>
+        </header>
+        <div class="image-viewer-body">
+          <button class="nav-arrow left" type="button" @click="viewerPrev">‹</button>
+          <img
+            :src="viewerImages[viewerIndex]"
+            alt="户型图大图"
+            :style="{ transform: `scale(${viewerScale}) rotate(${viewerRotate}deg)` }"
+            @wheel.prevent="handleWheel"
+            @touchstart.passive="handleTouchStart"
+            @touchmove.passive="handleTouchMove"
+            @touchend.passive="handleTouchEnd"
+          />
+          <button class="nav-arrow right" type="button" @click="viewerNext">›</button>
+          <div class="viewer-footer">
+            <span>第 {{ viewerIndex + 1 }} / {{ viewerImages.length }} 张</span>
+            <div class="viewer-rotate">
+              <button type="button" @click="rotateLeft">⟲</button>
+              <button type="button" @click="rotateRight">⟳</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

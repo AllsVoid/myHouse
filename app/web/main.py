@@ -184,6 +184,7 @@ def _ensure_house_table(conn) -> None:
                 link TEXT,
                 layout_image_data TEXT,
                 layout_image_type TEXT,
+                layout_images JSONB,
                 note TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -200,6 +201,7 @@ def _ensure_house_table(conn) -> None:
         cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS longitude NUMERIC;")
         cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS latitude NUMERIC;")
         cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS geo_address TEXT;")
+        cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS layout_images JSONB;")
 
 
 def _ensure_house_geo_table(conn) -> None:
@@ -300,7 +302,7 @@ def list_houses():
                         id, name, address, area, price, longitude, latitude, geo_address,
                         layout, building, floor, elevator, age,
                         ownership, usage, house_code, link, layout_image_data, layout_image_type,
-                        note, created_at, updated_at
+                        layout_images, note, created_at, updated_at
                     FROM house_data
                     ORDER BY created_at DESC;
                     """
@@ -329,9 +331,10 @@ def list_houses():
                     "link": row[16],
                     "layoutImageData": row[17],
                     "layoutImageType": row[18],
-                    "note": row[19],
-                    "createdAt": row[20].isoformat() if row[20] else None,
-                    "updatedAt": row[21].isoformat() if row[21] else None,
+                    "layoutImages": row[19],
+                    "note": row[20],
+                    "createdAt": row[21].isoformat() if row[21] else None,
+                    "updatedAt": row[22].isoformat() if row[22] else None,
                 }
             )
         return result
@@ -370,6 +373,9 @@ async def create_house(request: Request):
         raise HTTPException(status_code=400, detail="Missing required fields")
     geo_query = f"{address} {building}".strip()
     longitude, latitude, geo_address = _geocode_address(geo_query)
+    layout_images = data.get("layoutImages")
+    if not layout_images and data.get("layoutImageData"):
+        layout_images = [data.get("layoutImageData")]
     try:
         with connect(DATABASE_URL) as conn:
             _ensure_house_table(conn)
@@ -379,16 +385,16 @@ async def create_house(request: Request):
                     INSERT INTO house_data (
                         name, address, area, price, longitude, latitude, geo_address,
                         layout, building, floor, elevator, age,
-                        ownership, usage, house_code, link, layout_image_data, layout_image_type, note
+                        ownership, usage, house_code, link, layout_image_data, layout_image_type, layout_images, note
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     RETURNING
                         id, name, address, area, price, longitude, latitude, geo_address,
                         layout, building, floor, elevator, age,
                         ownership, usage, house_code, link, layout_image_data, layout_image_type,
-                        note, created_at, updated_at;
+                        layout_images, note, created_at, updated_at;
                     """,
                     (
                         name,
@@ -409,6 +415,7 @@ async def create_house(request: Request):
                         data.get("link"),
                         data.get("layoutImageData"),
                         data.get("layoutImageType"),
+                        Json(layout_images) if Json and layout_images is not None else layout_images,
                         data.get("note"),
                     ),
                 )
@@ -433,9 +440,10 @@ async def create_house(request: Request):
             "link": row[16],
             "layoutImageData": row[17],
             "layoutImageType": row[18],
-            "note": row[19],
-            "createdAt": row[20].isoformat() if row[20] else None,
-            "updatedAt": row[21].isoformat() if row[21] else None,
+            "layoutImages": row[19],
+            "note": row[20],
+            "createdAt": row[21].isoformat() if row[21] else None,
+            "updatedAt": row[22].isoformat() if row[22] else None,
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -472,6 +480,9 @@ async def update_house(house_id: int, request: Request):
         raise HTTPException(status_code=400, detail="Missing required fields")
     geo_query = f"{address} {building}".strip()
     longitude, latitude, geo_address = _geocode_address(geo_query)
+    layout_images = data.get("layoutImages")
+    if not layout_images and data.get("layoutImageData"):
+        layout_images = [data.get("layoutImageData")]
     try:
         with connect(DATABASE_URL) as conn:
             _ensure_house_table(conn)
@@ -498,6 +509,7 @@ async def update_house(house_id: int, request: Request):
                         link = %s,
                         layout_image_data = %s,
                         layout_image_type = %s,
+                        layout_images = %s,
                         note = %s,
                         updated_at = NOW()
                     WHERE id = %s
@@ -505,7 +517,7 @@ async def update_house(house_id: int, request: Request):
                         id, name, address, area, price, longitude, latitude, geo_address,
                         layout, building, floor, elevator, age,
                         ownership, usage, house_code, link, layout_image_data, layout_image_type,
-                        note, created_at, updated_at;
+                        layout_images, note, created_at, updated_at;
                     """,
                     (
                         name,
@@ -526,6 +538,7 @@ async def update_house(house_id: int, request: Request):
                         data.get("link"),
                         data.get("layoutImageData"),
                         data.get("layoutImageType"),
+                        Json(layout_images) if Json and layout_images is not None else layout_images,
                         data.get("note"),
                         house_id,
                     ),
@@ -553,9 +566,10 @@ async def update_house(house_id: int, request: Request):
             "link": row[16],
             "layoutImageData": row[17],
             "layoutImageType": row[18],
-            "note": row[19],
-            "createdAt": row[20].isoformat() if row[20] else None,
-            "updatedAt": row[21].isoformat() if row[21] else None,
+            "layoutImages": row[19],
+            "note": row[20],
+            "createdAt": row[21].isoformat() if row[21] else None,
+            "updatedAt": row[22].isoformat() if row[22] else None,
         }
     except HTTPException:
         raise
