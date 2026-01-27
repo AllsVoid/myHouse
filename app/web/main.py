@@ -8,9 +8,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import FileResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from dotenv import load_dotenv
 try:
@@ -29,18 +28,27 @@ POLYGON_DIR = BASE_DIR / "data" / "polygons"
 POINTS_DIR = POLYGON_DIR / "points"
 ITEMS_DIR = POLYGON_DIR / "items"
 BACKUP_DIR = POLYGON_DIR / "_backup"
+AMAP_KEY = os.getenv("AMAP_KEY", "").strip()
 AMAP_JS_KEY = os.getenv("AMAP_JS_KEY", "").strip()
 AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+API_BASE_URL = os.getenv("API_BASE_URL", "").strip()
+FRONTEND_ORIGINS = os.getenv(
+    "FRONTEND_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173",
+).strip()
 
-app = FastAPI(title="GeoJSON Viewer")
+app = FastAPI(title="GeoJSON API")
 
-# Static files
-app.mount(
-    "/static", StaticFiles(directory=BASE_DIR / "app" / "web" / "static"), name="static"
+allowed_origins = [origin.strip() for origin in FRONTEND_ORIGINS.split(",") if origin.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "web" / "templates"))
 
 
 def _validate_filename(filename: str) -> None:
@@ -152,17 +160,531 @@ def _ensure_geojson_table(conn) -> None:
         )
 
 
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request):
-    # print(f"AMAP_JS_KEY: {AMAP_JS_KEY}, AMAP_SECURITY_JS_CODE: {AMAP_SECURITY_JS_CODE}")
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "amap_key": AMAP_JS_KEY,
-            "amap_security_js_code": AMAP_SECURITY_JS_CODE,
-        },
-    )
+def _ensure_house_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS house_data (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                address TEXT NOT NULL,
+                area NUMERIC,
+                price NUMERIC,
+                longitude NUMERIC,
+                latitude NUMERIC,
+                geo_address TEXT,
+                layout TEXT,
+                building TEXT,
+                floor TEXT,
+                elevator TEXT,
+                age TEXT,
+                ownership TEXT,
+                usage TEXT,
+                house_code TEXT,
+                link TEXT,
+                layout_image_data TEXT,
+                layout_image_type TEXT,
+                note TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS house_data_created_at_idx
+            ON house_data (created_at DESC);
+            """
+        )
+        cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS price NUMERIC;")
+        cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS longitude NUMERIC;")
+        cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS latitude NUMERIC;")
+        cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS geo_address TEXT;")
+
+
+def _ensure_house_geo_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS house_geo (
+                id SMALLINT PRIMARY KEY,
+                geojson JSONB NOT NULL,
+                etag TEXT,
+                last_modified TIMESTAMPTZ,
+                source_updated_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+
+def _house_has_columns(conn, column_names: list[str]) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'house_data';
+            """
+        )
+        existing = {row[0] for row in cur.fetchall()}
+    return all(name in existing for name in column_names)
+
+
+def _safe_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _geocode_address(address: str) -> tuple[Optional[float], Optional[float], Optional[str]]:
+    if not address or not AMAP_KEY:
+        return None, None, None
+    from urllib.parse import urlencode
+    from urllib.request import urlopen
+
+    params = urlencode({"key": AMAP_KEY, "address": address})
+    url = f"https://restapi.amap.com/v3/geocode/geo?{params}"
+    try:
+        with urlopen(url, timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None, None, None
+    geocodes = payload.get("geocodes") or []
+    if not geocodes:
+        return None, None, None
+    location = geocodes[0].get("location")
+    if not location or "," not in location:
+        return None, None, None
+    lng_str, lat_str = location.split(",", 1)
+    try:
+        return float(lng_str), float(lat_str), address
+    except ValueError:
+        return None, None, None
+
+
+
+
+@app.get("/api/config")
+def get_frontend_config():
+    return {
+        "api_base_url": API_BASE_URL,
+        "amap_key": AMAP_KEY,
+        "amap_js_key": AMAP_JS_KEY,
+        "amap_security_js_code": AMAP_SECURITY_JS_CODE,
+    }
+
+
+@app.get("/api/houses")
+def list_houses():
+    if not DATABASE_URL:
+        raise HTTPException(status_code=400, detail="Missing DATABASE_URL")
+    if not connect:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "psycopg is not available. Install psycopg with a libpq backend "
+                "(e.g. `uv add 'psycopg[binary]'` or install system libpq)."
+            ),
+        )
+    try:
+        with connect(DATABASE_URL) as conn:
+            _ensure_house_table(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id, name, address, area, price, longitude, latitude, geo_address,
+                        layout, building, floor, elevator, age,
+                        ownership, usage, house_code, link, layout_image_data, layout_image_type,
+                        note, created_at, updated_at
+                    FROM house_data
+                    ORDER BY created_at DESC;
+                    """
+                )
+                rows = cur.fetchall()
+        result = []
+        for row in rows:
+            result.append(
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "address": row[2],
+                    "area": float(row[3]) if row[3] is not None else None,
+                    "price": float(row[4]) if row[4] is not None else None,
+                    "longitude": float(row[5]) if row[5] is not None else None,
+                    "latitude": float(row[6]) if row[6] is not None else None,
+                    "geoAddress": row[7],
+                    "layout": row[8],
+                    "building": row[9],
+                    "floor": row[10],
+                    "elevator": row[11],
+                    "age": row[12],
+                    "ownership": row[13],
+                    "usage": row[14],
+                    "houseCode": row[15],
+                    "link": row[16],
+                    "layoutImageData": row[17],
+                    "layoutImageType": row[18],
+                    "note": row[19],
+                    "createdAt": row[20].isoformat() if row[20] else None,
+                    "updatedAt": row[21].isoformat() if row[21] else None,
+                }
+            )
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/houses")
+async def create_house(request: Request):
+    if not DATABASE_URL:
+        raise HTTPException(status_code=400, detail="Missing DATABASE_URL")
+    if not connect:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "psycopg is not available. Install psycopg with a libpq backend "
+                "(e.g. `uv add 'psycopg[binary]'` or install system libpq)."
+            ),
+        )
+    data = await request.json()
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    name = (data.get("name") or "").strip()
+    address = (data.get("address") or "").strip()
+    area = data.get("area")
+    price = data.get("price")
+    building = (data.get("building") or "").strip()
+    if (
+        not name
+        or not address
+        or area is None
+        or str(area).strip() == ""
+        or price is None
+        or str(price).strip() == ""
+    ):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+    geo_query = f"{address} {building}".strip()
+    longitude, latitude, geo_address = _geocode_address(geo_query)
+    try:
+        with connect(DATABASE_URL) as conn:
+            _ensure_house_table(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO house_data (
+                        name, address, area, price, longitude, latitude, geo_address,
+                        layout, building, floor, elevator, age,
+                        ownership, usage, house_code, link, layout_image_data, layout_image_type, note
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    RETURNING
+                        id, name, address, area, price, longitude, latitude, geo_address,
+                        layout, building, floor, elevator, age,
+                        ownership, usage, house_code, link, layout_image_data, layout_image_type,
+                        note, created_at, updated_at;
+                    """,
+                    (
+                        name,
+                        address,
+                        area,
+                        price,
+                        longitude,
+                        latitude,
+                        geo_address,
+                        data.get("layout"),
+                        building,
+                        data.get("floor"),
+                        data.get("elevator"),
+                        data.get("age"),
+                        data.get("ownership"),
+                        data.get("usage"),
+                        data.get("houseCode"),
+                        data.get("link"),
+                        data.get("layoutImageData"),
+                        data.get("layoutImageType"),
+                        data.get("note"),
+                    ),
+                )
+                row = cur.fetchone()
+        return {
+            "id": row[0],
+            "name": row[1],
+            "address": row[2],
+            "area": float(row[3]) if row[3] is not None else None,
+            "price": float(row[4]) if row[4] is not None else None,
+            "longitude": float(row[5]) if row[5] is not None else None,
+            "latitude": float(row[6]) if row[6] is not None else None,
+            "geoAddress": row[7],
+            "layout": row[8],
+            "building": row[9],
+            "floor": row[10],
+            "elevator": row[11],
+            "age": row[12],
+            "ownership": row[13],
+            "usage": row[14],
+            "houseCode": row[15],
+            "link": row[16],
+            "layoutImageData": row[17],
+            "layoutImageType": row[18],
+            "note": row[19],
+            "createdAt": row[20].isoformat() if row[20] else None,
+            "updatedAt": row[21].isoformat() if row[21] else None,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.put("/api/houses/{house_id}")
+async def update_house(house_id: int, request: Request):
+    if not DATABASE_URL:
+        raise HTTPException(status_code=400, detail="Missing DATABASE_URL")
+    if not connect:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "psycopg is not available. Install psycopg with a libpq backend "
+                "(e.g. `uv add 'psycopg[binary]'` or install system libpq)."
+            ),
+        )
+    data = await request.json()
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    name = (data.get("name") or "").strip()
+    address = (data.get("address") or "").strip()
+    area = data.get("area")
+    price = data.get("price")
+    building = (data.get("building") or "").strip()
+    if (
+        not name
+        or not address
+        or area is None
+        or str(area).strip() == ""
+        or price is None
+        or str(price).strip() == ""
+    ):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+    geo_query = f"{address} {building}".strip()
+    longitude, latitude, geo_address = _geocode_address(geo_query)
+    try:
+        with connect(DATABASE_URL) as conn:
+            _ensure_house_table(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE house_data
+                    SET
+                        name = %s,
+                        address = %s,
+                        area = %s,
+                        price = %s,
+                        longitude = %s,
+                        latitude = %s,
+                        geo_address = %s,
+                        layout = %s,
+                        building = %s,
+                        floor = %s,
+                        elevator = %s,
+                        age = %s,
+                        ownership = %s,
+                        usage = %s,
+                        house_code = %s,
+                        link = %s,
+                        layout_image_data = %s,
+                        layout_image_type = %s,
+                        note = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING
+                        id, name, address, area, price, longitude, latitude, geo_address,
+                        layout, building, floor, elevator, age,
+                        ownership, usage, house_code, link, layout_image_data, layout_image_type,
+                        note, created_at, updated_at;
+                    """,
+                    (
+                        name,
+                        address,
+                        area,
+                        price,
+                        longitude,
+                        latitude,
+                        geo_address,
+                        data.get("layout"),
+                        building,
+                        data.get("floor"),
+                        data.get("elevator"),
+                        data.get("age"),
+                        data.get("ownership"),
+                        data.get("usage"),
+                        data.get("houseCode"),
+                        data.get("link"),
+                        data.get("layoutImageData"),
+                        data.get("layoutImageType"),
+                        data.get("note"),
+                        house_id,
+                    ),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="House not found")
+        return {
+            "id": row[0],
+            "name": row[1],
+            "address": row[2],
+            "area": float(row[3]) if row[3] is not None else None,
+            "price": float(row[4]) if row[4] is not None else None,
+            "longitude": float(row[5]) if row[5] is not None else None,
+            "latitude": float(row[6]) if row[6] is not None else None,
+            "geoAddress": row[7],
+            "layout": row[8],
+            "building": row[9],
+            "floor": row[10],
+            "elevator": row[11],
+            "age": row[12],
+            "ownership": row[13],
+            "usage": row[14],
+            "houseCode": row[15],
+            "link": row[16],
+            "layoutImageData": row[17],
+            "layoutImageType": row[18],
+            "note": row[19],
+            "createdAt": row[20].isoformat() if row[20] else None,
+            "updatedAt": row[21].isoformat() if row[21] else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.delete("/api/houses/{house_id}")
+def delete_house(house_id: int):
+    if not DATABASE_URL:
+        raise HTTPException(status_code=400, detail="Missing DATABASE_URL")
+    if not connect:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "psycopg is not available. Install psycopg with a libpq backend "
+                "(e.g. `uv add 'psycopg[binary]'` or install system libpq)."
+            ),
+        )
+    try:
+        with connect(DATABASE_URL) as conn:
+            _ensure_house_table(conn)
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM house_data WHERE id = %s;", (house_id,))
+        return {"status": "ok"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/houses/geojson")
+def get_houses_geojson(request: Request):
+    if not DATABASE_URL:
+        raise HTTPException(status_code=400, detail="Missing DATABASE_URL")
+    if not connect:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "psycopg is not available. Install psycopg with a libpq backend "
+                "(e.g. `uv add 'psycopg[binary]'` or install system libpq)."
+            ),
+        )
+    try:
+        with connect(DATABASE_URL) as conn:
+            _ensure_house_table(conn)
+            _ensure_house_geo_table(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(updated_at) FROM house_data;")
+                source_updated_at = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    SELECT geojson, etag, last_modified, source_updated_at
+                    FROM house_geo
+                    WHERE id = 1;
+                    """
+                )
+                cached = cur.fetchone()
+
+            if cached and cached[3] == source_updated_at:
+                return Response(
+                    content=json.dumps(cached[0], ensure_ascii=False),
+                    media_type="application/json",
+                )
+
+            if not _house_has_columns(conn, ["longitude", "latitude"]):
+                payload = {"type": "FeatureCollection", "features": []}
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT
+                            id, name, address, price, layout, building, floor, area,
+                            longitude, latitude, house_code, usage
+                        FROM house_data
+                        WHERE longitude IS NOT NULL AND latitude IS NOT NULL
+                        ORDER BY created_at DESC;
+                        """
+                    )
+                    rows = cur.fetchall()
+                features = []
+                for row in rows:
+                    lng = _safe_float(row[8])
+                    lat = _safe_float(row[9])
+                    if lng is None or lat is None:
+                        continue
+                    features.append(
+                        {
+                            "type": "Feature",
+                            "geometry": {
+                                "type": "Point",
+                                "coordinates": [lng, lat],
+                            },
+                            "properties": {
+                                "id": row[0],
+                                "name": row[1],
+                                "address": row[2],
+                                "price": _safe_float(row[3]),
+                                "layout": row[4],
+                                "building": row[5],
+                                "floor": row[6],
+                                "area": _safe_float(row[7]),
+                                "houseCode": row[10],
+                                "usage": row[11],
+                            },
+                        }
+                    )
+                payload = {"type": "FeatureCollection", "features": features}
+
+            with conn.cursor() as cur:
+                geojson_value = Json(payload) if Json else json.dumps(payload, ensure_ascii=False)
+                cur.execute(
+                    """
+                    INSERT INTO house_geo (id, geojson, etag, last_modified, source_updated_at, updated_at)
+                    VALUES (1, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (id) DO UPDATE
+                    SET geojson = EXCLUDED.geojson,
+                        etag = EXCLUDED.etag,
+                        last_modified = EXCLUDED.last_modified,
+                        source_updated_at = EXCLUDED.source_updated_at,
+                        updated_at = NOW();
+                    """,
+                    (geojson_value, None, None, source_updated_at),
+                )
+
+        return Response(
+            content=json.dumps(payload, ensure_ascii=False),
+            media_type="application/json",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/polygons", response_model=List[str])

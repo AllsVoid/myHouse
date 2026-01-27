@@ -1,0 +1,68 @@
+body {
+  margin: 0;
+}
+
+.geo-page {
+  min-height: 100vh;
+  background: #f5f6f8;
+}
+.geo-header {
+  padding: 20px 28px;
+  background: #ffffff;
+  border-bottom: 1px solid #e4e7ee;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.geo-header h1 {
+  margin: 0 0 4px;
+  font-size: 24px;
+}
+.geo-error {
+  margin: 12px 28px;
+  padding: 10px 12px;
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #991b1b;
+}
+
+#controls {
+  padding: 10px 12px;
+  background: #f7f7f7;
+  border-bottom: 1px solid #ddd;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+#map {
+  height: calc(100vh - 168px);
+}
+select,
+input[type="file"],
+button {
+  padding: 6px 10px;
+}
+.status {
+  color: #333;
+  font-size: 14px;
+}
+.spacer {
+  margin-left: 20px;
+}
+.point-marker {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff5722;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+.point-boundary {
+  background: #ff5722;
+}
+.point-include {
+  background: #1e88e5;
+}

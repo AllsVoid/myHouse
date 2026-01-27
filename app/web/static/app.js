@@ -28,6 +28,7 @@ let originalItemsGeoJSON = null;
 let currentFileName = null;
 let currentFileSource = 'server';
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const API_BASE_URL = window.__API_BASE_URL__ || '';
 const responseCache = {
   polygons: new Map(),
   points: new Map(),
@@ -61,12 +62,27 @@ function cacheSet(map, key, data) {
   map.set(key, { ts: Date.now(), data });
 }
 
+function toApiUrl(url) {
+  if (!url) return url;
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  if (url.startsWith('/')) {
+    return `${API_BASE_URL}${url}`;
+  }
+  return url;
+}
+
+function apiFetch(url, options) {
+  return fetch(toApiUrl(url), options);
+}
+
 async function fetchJsonWithCache(url, cacheMap, cacheKey, force = false) {
   if (!force) {
     const cached = cacheGet(cacheMap, cacheKey);
     if (cached) return cached;
   }
-  const resp = await fetch(url);
+  const resp = await apiFetch(url);
   if (!resp.ok) throw new Error(`请求失败:${resp.status}`);
   const data = await resp.json();
   cacheSet(cacheMap, cacheKey, data);
@@ -206,7 +222,7 @@ async function restoreHistoryAsCurrent() {
   }
   setStatus('正在恢复历史版本...');
   try {
-    const resp = await fetch(`/api/history/${encodeURIComponent(historySelect.value)}`);
+    const resp = await apiFetch(`/api/history/${encodeURIComponent(historySelect.value)}`);
     if (!resp.ok) throw new Error('历史版本读取失败');
     const data = await resp.json();
     applyHistoryData(data, { asCurrent: true });
@@ -512,7 +528,7 @@ async function saveGeoJSON(kind, geojson) {
       ? `/api/items/${encodeURIComponent(currentFileName)}`
       : `/api/polygons/${encodeURIComponent(currentFileName)}`;
   setStatus('保存中...');
-  const resp = await fetch(endpoint, {
+  const resp = await apiFetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(geojson)
@@ -532,7 +548,7 @@ async function saveGeoJSON(kind, geojson) {
 
 async function saveCurrentToDatabase() {
   setStatus('正在保存全部数据到数据库...');
-  const resp = await fetch('/api/save_all', { method: 'POST' });
+  const resp = await apiFetch('/api/save_all', { method: 'POST' });
   if (!resp.ok) {
     const detail = await resp.text();
     setStatus(`保存失败: ${detail}`);

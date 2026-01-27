@@ -38,11 +38,25 @@ python main.py polygon --key <AMAP_KEY>
 uvicorn app.web.main:app --host 0.0.0.0 --port 8000
 ```
 
+### 5) 启动前端 (Vue)
+```bash
+cd frontend
+pnpm install
+pnpm dev
+```
+
 ## 环境变量
 - `ARK_API_KEY`：火山引擎 Ark LLM API Key
 - `AMAP_KEY`：高德 Web 服务 API Key（用于地理编码）
 - `AMAP_JS_KEY`：高德 JS API Key（用于前端地图）
 - `AMAP_SECURITY_JS_CODE`：高德安全密钥（如已开通）
+- `FRONTEND_ORIGINS`：前端地址白名单（逗号分隔，默认 `http://localhost:5173`）
+
+## 前端环境变量
+在 `frontend/.env` 中配置：
+- `VITE_API_BASE_URL`：后端地址（默认 `http://localhost:8000`）
+- `VITE_AMAP_JS_KEY`：高德 JS API Key
+- `VITE_AMAP_SECURITY_JS_CODE`：高德安全密钥（可空）
 
 ## 说明
 - `polygon` 生成的是草稿多边形，用于快速预览，后续建议人工修正。
