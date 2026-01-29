@@ -32,6 +32,12 @@ const mapInfoWindow = ref(null)
 const mapCache = ref({ etag: '', lastModified: '', data: null })
 const amapKey = ref('')
 const amapSecurity = ref('')
+const apiBaseEnv = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+
+function apiUrl(path) {
+  if (!apiBaseEnv) return path
+  return `${apiBaseEnv}${path}`
+}
 
 const form = reactive({
   name: '',
@@ -62,7 +68,7 @@ const filteredHouses = computed(() => {
 async function loadFromApi() {
   errorMessage.value = ''
   try {
-    const resp = await fetch('/api/houses')
+    const resp = await fetch(apiUrl('/api/houses'))
     if (!resp.ok) throw new Error('读取房屋数据失败')
     houses.value = await resp.json()
   } catch (err) {
@@ -156,7 +162,7 @@ async function submitForm() {
   errorMessage.value = ''
   try {
     if (editingId.value) {
-      const resp = await fetch(`/api/houses/${editingId.value}`, {
+      const resp = await fetch(apiUrl(`/api/houses/${editingId.value}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -167,7 +173,7 @@ async function submitForm() {
         item.id === editingId.value ? updated : item
       )
     } else {
-      const resp = await fetch('/api/houses', {
+      const resp = await fetch(apiUrl('/api/houses'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -188,7 +194,7 @@ async function submitForm() {
 async function deleteHouse(item) {
   if (!window.confirm(`确认删除 ${item.name} 吗？`)) return
   try {
-    const resp = await fetch(`/api/houses/${item.id}`, { method: 'DELETE' })
+    const resp = await fetch(apiUrl(`/api/houses/${item.id}`), { method: 'DELETE' })
     if (!resp.ok) throw new Error('删除失败')
     houses.value = houses.value.filter((h) => h.id !== item.id)
     await refreshMapCache()
@@ -227,7 +233,7 @@ function loadScript(src) {
 }
 
 async function ensureAmapLoaded() {
-  const resp = await fetch('/api/config')
+  const resp = await fetch(apiUrl('/api/config'))
   if (!resp.ok) throw new Error('获取地图配置失败')
   const config = await resp.json()
   amapKey.value = config.amap_js_key || ''
@@ -245,7 +251,7 @@ async function fetchHouseGeoJson() {
   if (mapCache.value.data) {
     return mapCache.value.data
   }
-  const resp = await fetch('/api/houses/geojson')
+  const resp = await fetch(apiUrl('/api/houses/geojson'))
   if (!resp.ok) throw new Error('房源地图数据加载失败')
   const data = await resp.json()
   mapCache.value.data = data
