@@ -17,62 +17,33 @@ set -euo pipefail
 
 export PGPASSWORD
 
-sql_escape_literal() {
-  printf "%s" "$1" | sed "s/'/''/g"
-}
-
-sql_escape_ident() {
-  printf "%s" "$1" | sed 's/"/""/g'
-}
-
-db_user_lit=$(sql_escape_literal "$DB_USER")
-db_user_ident=$(sql_escape_ident "$DB_USER")
-db_password_lit=$(sql_escape_literal "$DB_PASSWORD")
-db_name_ident=$(sql_escape_ident "$DB_NAME")
-db_owner_ident=$(sql_escape_ident "$DB_OWNER")
-
-role_exists=$(
-  psql -v ON_ERROR_STOP=1 \
-    -h "$PGHOST" \
-    -p "$PGPORT" \
-    -U "$PGUSER" \
-    -d postgres \
-    -tAc "SELECT 1 FROM pg_roles WHERE rolname = '${db_user_lit}'"
-)
-
-if [[ -z "$role_exists" ]]; then
-  psql -v ON_ERROR_STOP=1 \
-    -h "$PGHOST" \
-    -p "$PGPORT" \
-    -U "$PGUSER" \
-    -d postgres \
-    -c "CREATE ROLE \"${db_user_ident}\" LOGIN PASSWORD '${db_password_lit}';"
-fi
-
-db_exists=$(
-  psql -v ON_ERROR_STOP=1 \
-    -h "$PGHOST" \
-    -p "$PGPORT" \
-    -U "$PGUSER" \
-    -d postgres \
-    -tAc "SELECT 1 FROM pg_database WHERE datname = '${db_name_ident}'"
-)
-
-if [[ -z "$db_exists" ]]; then
-  psql -v ON_ERROR_STOP=1 \
-    -h "$PGHOST" \
-    -p "$PGPORT" \
-    -U "$PGUSER" \
-    -d postgres \
-    -c "CREATE DATABASE \"${db_name_ident}\" OWNER \"${db_owner_ident}\";"
-fi
-
 psql -v ON_ERROR_STOP=1 \
   -h "$PGHOST" \
   -p "$PGPORT" \
   -U "$PGUSER" \
   -d postgres \
-  -c "ALTER DATABASE \"${db_name_ident}\" OWNER TO \"${db_owner_ident}\";"
+  -v db_name="$DB_NAME" \
+  -v db_user="$DB_USER" \
+  -v db_password="$DB_PASSWORD" \
+  -v db_owner="$DB_OWNER" <<'SQL'
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'db_user') THEN
+    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', :'db_user', :'db_password');
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db_name') THEN
+    EXECUTE format('CREATE DATABASE %I OWNER %I', :'db_name', :'db_owner');
+  END IF;
+END
+$$;
+
+ALTER DATABASE :db_name OWNER TO :db_owner;
+SQL
 
 if [[ "$ENABLE_POSTGIS" == "true" ]]; then
   psql -v ON_ERROR_STOP=1 \
