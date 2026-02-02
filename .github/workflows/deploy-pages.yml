@@ -39,13 +39,11 @@ jobs:
         run: tar -czf frontend-dist.tar.gz -C frontend dist
       - name: Package backend
         run: |
-          tar -czf backend.tar.gz \
-            app \
-            main.py \
-            pyproject.toml \
-            README.md \
-            docs \
-            scripts
+          FILES=(app main.py pyproject.toml README.md scripts)
+          if [ -d docs ]; then
+            FILES+=(docs)
+          fi
+          tar -czf backend.tar.gz "${FILES[@]}"
       - name: Create tag (manual trigger)
         if: github.event_name == 'workflow_dispatch'
         run: |
