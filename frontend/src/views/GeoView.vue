@@ -6,7 +6,6 @@ const errorMessage = ref('')
 const apiBase = ref('')
 const amapKey = ref('')
 const amapSecurity = ref('')
-const apiBaseEnv = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -32,11 +31,10 @@ function loadScript(src) {
 onMounted(async () => {
   errorMessage.value = ''
   try {
-    const configUrl = apiBaseEnv ? `${apiBaseEnv}/api/config` : '/api/config'
-    const resp = await fetch(configUrl)
+    const resp = await fetch('/api/config')
     if (!resp.ok) throw new Error('获取后端配置失败')
     const config = await resp.json()
-    apiBase.value = (config.api_base_url || apiBaseEnv || window.location.origin).replace(/\/$/, '')
+    apiBase.value = (config.api_base_url || window.location.origin).replace(/\/$/, '')
     amapKey.value = config.amap_js_key || ''
     amapSecurity.value = config.amap_security_js_code || ''
     window.__API_BASE_URL__ = apiBase.value
