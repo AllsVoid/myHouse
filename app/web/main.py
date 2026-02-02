@@ -10,7 +10,9 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 try:
@@ -51,6 +53,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount(
+    "/static", StaticFiles(directory=BASE_DIR / "app" / "web" / "static"), name="static"
+)
+templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "web" / "templates"))
+
+
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get("/geo", response_class=HTMLResponse)
+def geo_page(request: Request):
+    return templates.TemplateResponse(
+        "geo.html",
+        {
+            "request": request,
+            "amap_key": AMAP_JS_KEY,
+            "amap_security_js_code": AMAP_SECURITY_JS_CODE,
+        },
+    )
+
+
+@app.get("/houses", response_class=HTMLResponse)
+def houses_page(request: Request):
+    return templates.TemplateResponse("houses.html", {"request": request})
 
 
 def _validate_filename(filename: str) -> None:
