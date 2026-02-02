@@ -29,6 +29,9 @@ jobs:
           node-version: 20
           cache: 'pnpm'
           cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Install dependencies
         run: pnpm install
         working-directory: frontend
@@ -37,13 +40,15 @@ jobs:
         working-directory: frontend
       - name: Package frontend dist
         run: tar -czf frontend-dist.tar.gz -C frontend dist
-      - name: Package backend
+      - name: Build backend binary
         run: |
-          FILES=(app main.py pyproject.toml README.md scripts)
-          if [ -d docs ]; then
-            FILES+=(docs)
-          fi
-          tar -czf backend.tar.gz "${FILES[@]}"
+          python -m pip install --upgrade pip
+          pip install pyinstaller fastapi "uvicorn[standard]" python-dotenv "psycopg[binary]"
+          pyinstaller --onefile --name backend-server \
+            --add-data "app/web/templates:app/web/templates" \
+            --add-data "app/web/static:app/web/static" \
+            scripts/backend_entry.py
+          tar -czf backend-binary.tar.gz -C dist backend-server
       - name: Create tag (manual trigger)
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -58,4 +63,4 @@ jobs:
           name: ${{ github.event.inputs.release_name || github.ref_name }}
           files: |
             frontend-dist.tar.gz
-            backend.tar.gz
+            backend-binary.tar.gz
