@@ -45,6 +45,8 @@ const form = reactive({
   age: '',
   ownership: '',
   usage: '',
+  houseStatus: '',
+  intention: '',
   houseCode: '',
   link: '',
   note: ''
@@ -84,6 +86,8 @@ function resetForm() {
   form.age = ''
   form.ownership = ''
   form.usage = ''
+  form.houseStatus = ''
+  form.intention = ''
   form.houseCode = ''
   form.link = ''
   form.note = ''
@@ -109,6 +113,8 @@ function openEdit(item) {
   form.age = item.age || ''
   form.ownership = item.ownership || ''
   form.usage = item.usage || ''
+  form.houseStatus = item.houseStatus || ''
+  form.intention = item.intention || ''
   form.houseCode = item.houseCode || ''
   form.link = item.link || ''
   layoutImages.value = item.layoutImages?.length
@@ -145,6 +151,8 @@ async function submitForm() {
     age: form.age.trim(),
     ownership: form.ownership.trim(),
     usage: form.usage.trim(),
+    houseStatus: form.houseStatus.trim(),
+    intention: form.intention.trim(),
     houseCode: form.houseCode.trim(),
     link: form.link.trim(),
     layoutImages: layoutImages.value,
@@ -617,6 +625,23 @@ function triggerFilePicker(event) {
           <input v-model="form.usage" placeholder="例如：住宅" />
         </div>
         <div class="form-row">
+          <label>房屋状态</label>
+          <select v-model="form.houseStatus">
+            <option value="">请选择</option>
+            <option value="待出售">待出售</option>
+            <option value="已下架">已下架</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>意向</label>
+          <select v-model="form.intention">
+            <option value="">请选择</option>
+            <option value="待考察">待考察</option>
+            <option value="不考虑">不考虑</option>
+            <option value="心仪">心仪</option>
+          </select>
+        </div>
+        <div class="form-row">
           <label>房源码</label>
           <input v-model="form.houseCode" />
         </div>
@@ -688,6 +713,8 @@ function triggerFilePicker(event) {
             <span v-if="item.layout">{{ item.layout }}</span>
             <span v-if="item.building">{{ item.building }}</span>
             <span v-if="item.floor">{{ item.floor }}</span>
+            <span v-if="item.houseStatus">状态 {{ item.houseStatus }}</span>
+            <span v-if="item.intention">意向 {{ item.intention }}</span>
           </div>
           <div v-if="getItemImages(item).length" class="house-image">
             <img

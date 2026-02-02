@@ -7,11 +7,12 @@ from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.requests import Request
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
+from starlette.requests import Request
+
 try:
     from psycopg import connect
     from psycopg.types.json import Json
@@ -40,7 +41,9 @@ FRONTEND_ORIGINS = os.getenv(
 
 app = FastAPI(title="GeoJSON API")
 
-allowed_origins = [origin.strip() for origin in FRONTEND_ORIGINS.split(",") if origin.strip()]
+allowed_origins = [
+    origin.strip() for origin in FRONTEND_ORIGINS.split(",") if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -48,7 +51,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 
 def _validate_filename(filename: str) -> None:
@@ -60,7 +62,9 @@ def _write_geojson_file(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        backup_path = BACKUP_DIR / f"{path.stem}.{int(path.stat().st_mtime)}{path.suffix}"
+        backup_path = (
+            BACKUP_DIR / f"{path.stem}.{int(path.stat().st_mtime)}{path.suffix}"
+        )
         if not backup_path.exists():
             backup_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     payload = json.dumps(data, ensure_ascii=False, indent=2)
@@ -79,7 +83,9 @@ def _get_file_cache_headers(path: Path) -> tuple[str, datetime, dict]:
     return etag, last_modified, headers
 
 
-def _get_dir_cache_headers(dir_path: Path, pattern: str = "*.geojson") -> tuple[str, datetime, dict]:
+def _get_dir_cache_headers(
+    dir_path: Path, pattern: str = "*.geojson"
+) -> tuple[str, datetime, dict]:
     latest_mtime_ns = 0
     file_count = 0
     for path in dir_path.glob(pattern):
@@ -180,6 +186,8 @@ def _ensure_house_table(conn) -> None:
                 age TEXT,
                 ownership TEXT,
                 usage TEXT,
+                house_status TEXT,
+                intention TEXT,
                 house_code TEXT,
                 link TEXT,
                 layout_image_data TEXT,
@@ -198,10 +206,18 @@ def _ensure_house_table(conn) -> None:
             """
         )
         cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS price NUMERIC;")
-        cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS longitude NUMERIC;")
+        cur.execute(
+            "ALTER TABLE house_data ADD COLUMN IF NOT EXISTS longitude NUMERIC;"
+        )
         cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS latitude NUMERIC;")
         cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS geo_address TEXT;")
-        cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS layout_images JSONB;")
+        cur.execute(
+            "ALTER TABLE house_data ADD COLUMN IF NOT EXISTS layout_images JSONB;"
+        )
+        cur.execute(
+            "ALTER TABLE house_data ADD COLUMN IF NOT EXISTS house_status TEXT;"
+        )
+        cur.execute("ALTER TABLE house_data ADD COLUMN IF NOT EXISTS intention TEXT;")
 
 
 def _ensure_house_geo_table(conn) -> None:
@@ -242,7 +258,9 @@ def _safe_float(value: object) -> Optional[float]:
         return None
 
 
-def _geocode_address(address: str) -> tuple[Optional[float], Optional[float], Optional[str]]:
+def _geocode_address(
+    address: str,
+) -> tuple[Optional[float], Optional[float], Optional[str]]:
     if not address or not AMAP_KEY:
         return None, None, None
     from urllib.parse import urlencode
@@ -266,8 +284,6 @@ def _geocode_address(address: str) -> tuple[Optional[float], Optional[float], Op
         return float(lng_str), float(lat_str), address
     except ValueError:
         return None, None, None
-
-
 
 
 @app.get("/api/config")
@@ -301,7 +317,7 @@ def list_houses():
                     SELECT
                         id, name, address, area, price, longitude, latitude, geo_address,
                         layout, building, floor, elevator, age,
-                        ownership, usage, house_code, link, layout_image_data, layout_image_type,
+                        ownership, usage, house_status, intention, house_code, link, layout_image_data, layout_image_type,
                         layout_images, note, created_at, updated_at
                     FROM house_data
                     ORDER BY created_at DESC;
@@ -327,14 +343,16 @@ def list_houses():
                     "age": row[12],
                     "ownership": row[13],
                     "usage": row[14],
-                    "houseCode": row[15],
-                    "link": row[16],
-                    "layoutImageData": row[17],
-                    "layoutImageType": row[18],
-                    "layoutImages": row[19],
-                    "note": row[20],
-                    "createdAt": row[21].isoformat() if row[21] else None,
-                    "updatedAt": row[22].isoformat() if row[22] else None,
+                    "houseStatus": row[15],
+                    "intention": row[16],
+                    "houseCode": row[17],
+                    "link": row[18],
+                    "layoutImageData": row[19],
+                    "layoutImageType": row[20],
+                    "layoutImages": row[21],
+                    "note": row[22],
+                    "createdAt": row[23].isoformat() if row[23] else None,
+                    "updatedAt": row[24].isoformat() if row[24] else None,
                 }
             )
         return result
@@ -385,15 +403,15 @@ async def create_house(request: Request):
                     INSERT INTO house_data (
                         name, address, area, price, longitude, latitude, geo_address,
                         layout, building, floor, elevator, age,
-                        ownership, usage, house_code, link, layout_image_data, layout_image_type, layout_images, note
+                        ownership, usage, house_status, intention, house_code, link, layout_image_data, layout_image_type, layout_images, note
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     RETURNING
                         id, name, address, area, price, longitude, latitude, geo_address,
                         layout, building, floor, elevator, age,
-                        ownership, usage, house_code, link, layout_image_data, layout_image_type,
+                        ownership, usage, house_status, intention, house_code, link, layout_image_data, layout_image_type,
                         layout_images, note, created_at, updated_at;
                     """,
                     (
@@ -411,11 +429,17 @@ async def create_house(request: Request):
                         data.get("age"),
                         data.get("ownership"),
                         data.get("usage"),
+                        data.get("houseStatus"),
+                        data.get("intention"),
                         data.get("houseCode"),
                         data.get("link"),
                         data.get("layoutImageData"),
                         data.get("layoutImageType"),
-                        Json(layout_images) if Json and layout_images is not None else layout_images,
+                        (
+                            Json(layout_images)
+                            if Json and layout_images is not None
+                            else layout_images
+                        ),
                         data.get("note"),
                     ),
                 )
@@ -436,14 +460,16 @@ async def create_house(request: Request):
             "age": row[12],
             "ownership": row[13],
             "usage": row[14],
-            "houseCode": row[15],
-            "link": row[16],
-            "layoutImageData": row[17],
-            "layoutImageType": row[18],
-            "layoutImages": row[19],
-            "note": row[20],
-            "createdAt": row[21].isoformat() if row[21] else None,
-            "updatedAt": row[22].isoformat() if row[22] else None,
+            "houseStatus": row[15],
+            "intention": row[16],
+            "houseCode": row[17],
+            "link": row[18],
+            "layoutImageData": row[19],
+            "layoutImageType": row[20],
+            "layoutImages": row[21],
+            "note": row[22],
+            "createdAt": row[23].isoformat() if row[23] else None,
+            "updatedAt": row[24].isoformat() if row[24] else None,
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -505,6 +531,8 @@ async def update_house(house_id: int, request: Request):
                         age = %s,
                         ownership = %s,
                         usage = %s,
+                        house_status = %s,
+                        intention = %s,
                         house_code = %s,
                         link = %s,
                         layout_image_data = %s,
@@ -516,7 +544,7 @@ async def update_house(house_id: int, request: Request):
                     RETURNING
                         id, name, address, area, price, longitude, latitude, geo_address,
                         layout, building, floor, elevator, age,
-                        ownership, usage, house_code, link, layout_image_data, layout_image_type,
+                        ownership, usage, house_status, intention, house_code, link, layout_image_data, layout_image_type,
                         layout_images, note, created_at, updated_at;
                     """,
                     (
@@ -534,11 +562,17 @@ async def update_house(house_id: int, request: Request):
                         data.get("age"),
                         data.get("ownership"),
                         data.get("usage"),
+                        data.get("houseStatus"),
+                        data.get("intention"),
                         data.get("houseCode"),
                         data.get("link"),
                         data.get("layoutImageData"),
                         data.get("layoutImageType"),
-                        Json(layout_images) if Json and layout_images is not None else layout_images,
+                        (
+                            Json(layout_images)
+                            if Json and layout_images is not None
+                            else layout_images
+                        ),
                         data.get("note"),
                         house_id,
                     ),
@@ -562,14 +596,16 @@ async def update_house(house_id: int, request: Request):
             "age": row[12],
             "ownership": row[13],
             "usage": row[14],
-            "houseCode": row[15],
-            "link": row[16],
-            "layoutImageData": row[17],
-            "layoutImageType": row[18],
-            "layoutImages": row[19],
-            "note": row[20],
-            "createdAt": row[21].isoformat() if row[21] else None,
-            "updatedAt": row[22].isoformat() if row[22] else None,
+            "houseStatus": row[15],
+            "intention": row[16],
+            "houseCode": row[17],
+            "link": row[18],
+            "layoutImageData": row[19],
+            "layoutImageType": row[20],
+            "layoutImages": row[21],
+            "note": row[22],
+            "createdAt": row[23].isoformat() if row[23] else None,
+            "updatedAt": row[24].isoformat() if row[24] else None,
         }
     except HTTPException:
         raise
@@ -641,7 +677,7 @@ def get_houses_geojson(request: Request):
                         """
                         SELECT
                             id, name, address, price, layout, building, floor, area,
-                            longitude, latitude, house_code, usage
+                            longitude, latitude, house_code, usage, house_status, intention
                         FROM house_data
                         WHERE longitude IS NOT NULL AND latitude IS NOT NULL
                         ORDER BY created_at DESC;
@@ -672,13 +708,17 @@ def get_houses_geojson(request: Request):
                                 "area": _safe_float(row[7]),
                                 "houseCode": row[10],
                                 "usage": row[11],
+                                "houseStatus": row[12],
+                                "intention": row[13],
                             },
                         }
                     )
                 payload = {"type": "FeatureCollection", "features": features}
 
             with conn.cursor() as cur:
-                geojson_value = Json(payload) if Json else json.dumps(payload, ensure_ascii=False)
+                geojson_value = (
+                    Json(payload) if Json else json.dumps(payload, ensure_ascii=False)
+                )
                 cur.execute(
                     """
                     INSERT INTO house_geo (id, geojson, etag, last_modified, source_updated_at, updated_at)
@@ -709,7 +749,11 @@ def list_polygons(request: Request) -> List[str]:
     if _is_not_modified(request, etag, last_modified):
         return Response(status_code=304, headers=headers)
     response = sorted([p.name for p in POLYGON_DIR.glob("*.geojson")])
-    return Response(content=json.dumps(response, ensure_ascii=False), media_type="application/json", headers=headers)
+    return Response(
+        content=json.dumps(response, ensure_ascii=False),
+        media_type="application/json",
+        headers=headers,
+    )
 
 
 @app.get("/api/polygons/{filename}")
@@ -785,7 +829,14 @@ async def save_current(request: Request):
                             (save_id, file_name, school_name, kind, geojson, saved_at)
                         VALUES (%s, %s, %s, %s, %s, %s);
                         """,
-                        (save_id, file_name, school_name, "polygons", Json(polygons), saved_at),
+                        (
+                            save_id,
+                            file_name,
+                            school_name,
+                            "polygons",
+                            Json(polygons),
+                            saved_at,
+                        ),
                     )
                 if points:
                     cur.execute(
@@ -803,7 +854,14 @@ async def save_current(request: Request):
                             (save_id, file_name, school_name, kind, geojson, saved_at)
                         VALUES (%s, %s, %s, %s, %s, %s);
                         """,
-                        (save_id, file_name, school_name, "points", Json(points), saved_at),
+                        (
+                            save_id,
+                            file_name,
+                            school_name,
+                            "points",
+                            Json(points),
+                            saved_at,
+                        ),
                     )
         return {
             "status": "ok",
@@ -865,7 +923,14 @@ async def save_all():
                             (save_id, file_name, school_name, kind, geojson, saved_at)
                         VALUES (%s, %s, %s, %s, %s, %s);
                         """,
-                        (save_id, file_name, None, "polygons", Json(polygons), saved_at),
+                        (
+                            save_id,
+                            file_name,
+                            None,
+                            "polygons",
+                            Json(polygons),
+                            saved_at,
+                        ),
                     )
                     polygon_saved += 1
 
@@ -874,7 +939,9 @@ async def save_all():
                         try:
                             points = json.loads(points_path.read_text(encoding="utf-8"))
                         except Exception as exc:
-                            errors.append(f"{points_path.name}: points load failed ({exc})")
+                            errors.append(
+                                f"{points_path.name}: points load failed ({exc})"
+                            )
                         else:
                             cur.execute(
                                 """
@@ -891,7 +958,14 @@ async def save_all():
                                     (save_id, file_name, school_name, kind, geojson, saved_at)
                                 VALUES (%s, %s, %s, %s, %s, %s);
                                 """,
-                                (save_id, file_name, None, "points", Json(points), saved_at),
+                                (
+                                    save_id,
+                                    file_name,
+                                    None,
+                                    "points",
+                                    Json(points),
+                                    saved_at,
+                                ),
                             )
                             points_saved += 1
 
@@ -937,10 +1011,7 @@ def list_history(
                     (file_name, school_name),
                 )
                 rows = cur.fetchall()
-        return [
-            {"save_id": str(r[0]), "saved_at": r[1].isoformat()}
-            for r in rows
-        ]
+        return [{"save_id": str(r[0]), "saved_at": r[1].isoformat()} for r in rows]
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1041,5 +1112,3 @@ def get_items(request: Request, filename: str):
     if _is_not_modified(request, etag, last_modified):
         return Response(status_code=304, headers=headers)
     return FileResponse(str(path), media_type="application/json", headers=headers)
-
-
