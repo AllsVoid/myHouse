@@ -48,6 +48,9 @@ jobs:
             python3 -m pip install --upgrade pip
             pip install pyinstaller fastapi "uvicorn[standard]" python-dotenv "psycopg[binary]"
             pyinstaller --onefile --name backend-server \
+              --paths "." \
+              --hidden-import app.web.main \
+              --collect-submodules app \
               --add-data "app/web/templates:app/web/templates" \
               --add-data "app/web/static:app/web/static" \
               --add-data "frontend/dist:frontend/dist" \
