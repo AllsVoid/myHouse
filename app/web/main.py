@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
@@ -25,7 +26,18 @@ except Exception as exc:  # pragma: no cover - runtime dependency check
 else:
     _PSYCOPG_IMPORT_ERROR = None
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+
+def _get_base_dir() -> Path:
+    override = os.getenv("HOUSE_BASE_DIR")
+    if override:
+        return Path(override).resolve()
+    if getattr(sys, "frozen", False):
+        return Path.cwd()
+    return Path(__file__).resolve().parents[2]
+
+
+BASE_DIR = _get_base_dir()
+RESOURCE_BASE = Path(getattr(sys, "_MEIPASS", BASE_DIR))
 load_dotenv(dotenv_path=BASE_DIR / ".env")
 POLYGON_DIR = BASE_DIR / "data" / "polygons"
 POINTS_DIR = POLYGON_DIR / "points"
@@ -55,31 +67,50 @@ app.add_middleware(
 )
 
 app.mount(
-    "/static", StaticFiles(directory=BASE_DIR / "app" / "web" / "static"), name="static"
+    "/static",
+    StaticFiles(directory=RESOURCE_BASE / "app" / "web" / "static"),
+    name="static",
 )
-templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "web" / "templates"))
+templates = Jinja2Templates(directory=str(RESOURCE_BASE / "app" / "web" / "templates"))
+FRONTEND_DIST_DIR = RESOURCE_BASE / "frontend" / "dist"
 
 
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
-
-
-@app.get("/geo", response_class=HTMLResponse)
-def geo_page(request: Request):
-    return templates.TemplateResponse(
-        "geo.html",
-        {
-            "request": request,
-            "amap_key": AMAP_JS_KEY,
-            "amap_security_js_code": AMAP_SECURITY_JS_CODE,
-        },
+if FRONTEND_DIST_DIR.exists():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=FRONTEND_DIST_DIR / "assets"),
+        name="frontend-assets",
     )
 
+    @app.get("/{path:path}", include_in_schema=False)
+    def serve_frontend(path: str):
+        if path.startswith("api/") or path.startswith("static/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        target = FRONTEND_DIST_DIR / path
+        if path and target.exists() and target.is_file():
+            return FileResponse(str(target))
+        return FileResponse(str(FRONTEND_DIST_DIR / "index.html"))
 
-@app.get("/houses", response_class=HTMLResponse)
-def houses_page(request: Request):
-    return templates.TemplateResponse("houses.html", {"request": request})
+else:
+
+    @app.get("/", response_class=HTMLResponse)
+    def index(request: Request):
+        return templates.TemplateResponse("index.html", {"request": request})
+
+    @app.get("/geo", response_class=HTMLResponse)
+    def geo_page(request: Request):
+        return templates.TemplateResponse(
+            "geo.html",
+            {
+                "request": request,
+                "amap_key": AMAP_JS_KEY,
+                "amap_security_js_code": AMAP_SECURITY_JS_CODE,
+            },
+        )
+
+    @app.get("/houses", response_class=HTMLResponse)
+    def houses_page(request: Request):
+        return templates.TemplateResponse("houses.html", {"request": request})
 
 
 def _validate_filename(filename: str) -> None:
