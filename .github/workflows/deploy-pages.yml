@@ -46,7 +46,7 @@ jobs:
             apt-get update
             apt-get install -y python3 python3-pip
             python3 -m pip install --upgrade pip
-            pip install pyinstaller fastapi "uvicorn[standard]" python-dotenv "psycopg[binary]"
+            pip install pyinstaller fastapi "uvicorn[standard]" python-dotenv "psycopg[binary]" jinja2
             pyinstaller --onefile --name backend-server \
               --paths "." \
               --hidden-import app.web.main \
