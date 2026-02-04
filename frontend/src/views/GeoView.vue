@@ -51,7 +51,7 @@ onMounted(async () => {
       await loadScript(`https://webapi.amap.com/maps?v=2.0&key=${amapKey.value}`)
     }
     if (!window.__geoScriptLoaded) {
-      await loadScript(`${apiBase.value}/static/app.js`)
+      await loadScript('/geo-app.js')
       window.__geoScriptLoaded = true
     }
     if (!window.__geoInited && typeof window.initMap === 'function') {
