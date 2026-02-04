@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
 try:
@@ -65,23 +64,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FRONTEND_DIST_DIR = RESOURCE_BASE / "frontend" / "dist"
-
-if FRONTEND_DIST_DIR.exists():
-    app.mount(
-        "/assets",
-        StaticFiles(directory=FRONTEND_DIST_DIR / "assets"),
-        name="frontend-assets",
-    )
-
-    @app.get("/{path:path}", include_in_schema=False)
-    def serve_frontend(path: str):
-        if path.startswith("api/") or path.startswith("static/"):
-            raise HTTPException(status_code=404, detail="Not found")
-        target = FRONTEND_DIST_DIR / path
-        if path and target.exists() and target.is_file():
-            return FileResponse(str(target))
-        return FileResponse(str(FRONTEND_DIST_DIR / "index.html"))
+# API-only service: frontend runs separately.
 
 
 def _validate_filename(filename: str) -> None:
