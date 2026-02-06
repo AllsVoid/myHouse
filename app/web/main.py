@@ -11,8 +11,8 @@ from urllib.parse import quote
 from uuid import uuid4
 
 import boto3
-from botocore.exceptions import BotoCoreError, ClientError
-from dotenv import load_dotenv
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
+from dotenv import dotenv_values, load_dotenv, set_key
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
@@ -53,12 +53,18 @@ API_BASE_URL = os.getenv("API_BASE_URL", "").strip()
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "").strip()
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
 AWS_REGION = os.getenv("AWS_REGION", "").strip()
+AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION", "").strip()
 S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
 S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL", "").strip()
 FRONTEND_ORIGINS = os.getenv(
     "FRONTEND_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173",
 ).strip()
+
+
+def _get_env_path() -> Path:
+    return BASE_DIR / ".env"
+
 
 app = FastAPI(title="GeoJSON API")
 
@@ -273,22 +279,24 @@ def _house_has_columns(conn, column_names: list[str]) -> bool:
 
 
 def _get_s3_client():
-    if not S3_BUCKET or not AWS_REGION:
+    if not S3_BUCKET:
         raise HTTPException(status_code=400, detail="Missing S3 configuration")
-    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
-        raise HTTPException(status_code=400, detail="Missing S3 credentials")
+    region = AWS_REGION or AWS_DEFAULT_REGION or None
     return boto3.client(
         "s3",
-        region_name=AWS_REGION,
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=region,
+        aws_access_key_id=AWS_ACCESS_KEY_ID or None,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY or None,
     )
 
 
 def _build_s3_public_url(key: str) -> str:
     base = S3_PUBLIC_BASE_URL
     if not base:
-        base = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com"
+        region = AWS_REGION or AWS_DEFAULT_REGION
+        if not region:
+            raise HTTPException(status_code=400, detail="Missing S3 region")
+        base = f"https://{S3_BUCKET}.s3.{region}.amazonaws.com"
     return f"{base.rstrip('/')}/{quote(key)}"
 
 
@@ -310,6 +318,8 @@ async def upload_image(file: UploadFile = File(...)):
             key,
             ExtraArgs={"ContentType": file.content_type},
         )
+    except NoCredentialsError as exc:
+        raise HTTPException(status_code=400, detail="Missing S3 credentials") from exc
     except (BotoCoreError, ClientError) as exc:
         raise HTTPException(status_code=500, detail="Upload to S3 failed") from exc
     return {
@@ -364,6 +374,139 @@ def get_frontend_config():
         "amap_js_key": AMAP_JS_KEY,
         "amap_security_js_code": AMAP_SECURITY_JS_CODE,
     }
+
+
+_SETTINGS_KEYS = [
+    "DATABASE_URL",
+    "AMAP_KEY",
+    "AMAP_JS_KEY",
+    "AMAP_SECURITY_JS_CODE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "S3_BUCKET",
+    "S3_PUBLIC_BASE_URL",
+    "API_BASE_URL",
+    "FRONTEND_ORIGINS",
+]
+_SECRET_KEYS = {
+    "DATABASE_URL",
+    "AMAP_KEY",
+    "AMAP_JS_KEY",
+    "AMAP_SECURITY_JS_CODE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+}
+
+
+def _read_settings() -> dict:
+    env_path = _get_env_path()
+    if env_path.exists():
+        values = dotenv_values(env_path)
+    else:
+        values = {}
+    payload = {"flags": {}}
+    for key in _SETTINGS_KEYS:
+        value = values.get(key)
+        if value is None:
+            value = os.getenv(key, "")
+        payload["flags"][f"{key}_set"] = bool(value)
+        if key in _SECRET_KEYS:
+            continue
+        payload[key] = value or ""
+    return payload
+
+
+def _persist_settings(updates: dict) -> dict:
+    env_path = _get_env_path()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    if not env_path.exists():
+        env_path.touch(mode=0o600, exist_ok=True)
+    for key, value in updates.items():
+        if key not in _SETTINGS_KEYS:
+            continue
+        if key in _SECRET_KEYS and value == "":
+            continue
+        set_key(env_path, key, value or "", quote_mode="auto")
+        os.environ[key] = value or ""
+    load_dotenv(dotenv_path=env_path, override=True)
+    return _read_settings()
+
+
+@app.get("/api/settings")
+def get_settings():
+    return _read_settings()
+
+
+@app.post("/api/settings")
+async def save_settings(request: Request):
+    data = await request.json()
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    config = data.get("config")
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=400, detail="Missing config")
+    updated = _persist_settings(config)
+    return {"status": "ok", "config": updated}
+
+
+def _build_s3_client_from_config(config: dict):
+    region = (
+        config.get("AWS_REGION") or config.get("AWS_DEFAULT_REGION") or ""
+    ).strip()
+    access_key = (config.get("AWS_ACCESS_KEY_ID") or "").strip()
+    secret_key = (config.get("AWS_SECRET_ACCESS_KEY") or "").strip()
+    kwargs = {}
+    if region:
+        kwargs["region_name"] = region
+    if access_key and secret_key:
+        kwargs["aws_access_key_id"] = access_key
+        kwargs["aws_secret_access_key"] = secret_key
+    return boto3.client("s3", **kwargs)
+
+
+@app.post("/api/settings/test")
+async def test_settings(request: Request):
+    data = await request.json()
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    target = (data.get("target") or "").strip().lower()
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    current = _read_settings()
+    merged = {**current, **config}
+    if target == "postgres":
+        if not merged.get("DATABASE_URL") and not os.getenv("DATABASE_URL"):
+            raise HTTPException(status_code=400, detail="Missing DATABASE_URL")
+        if not merged.get("DATABASE_URL"):
+            merged["DATABASE_URL"] = os.getenv("DATABASE_URL")
+        if not connect:
+            raise HTTPException(
+                status_code=500,
+                detail="psycopg is not available",
+            )
+        try:
+            with connect(merged["DATABASE_URL"]) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1;")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok"}
+    if target == "s3":
+        bucket = (merged.get("S3_BUCKET") or "").strip()
+        if not bucket:
+            raise HTTPException(status_code=400, detail="Missing S3_BUCKET")
+        try:
+            client = _build_s3_client_from_config(merged)
+            client.head_bucket(Bucket=bucket)
+        except NoCredentialsError as exc:
+            raise HTTPException(
+                status_code=400, detail="Missing S3 credentials"
+            ) from exc
+        except (BotoCoreError, ClientError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok"}
+    raise HTTPException(status_code=400, detail="Unsupported test target")
 
 
 @app.get("/api/houses")
