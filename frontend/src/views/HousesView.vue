@@ -1,4 +1,5 @@
 <script setup>
+import imageCompression from 'browser-image-compression'
 import { computed, onMounted, reactive, ref, nextTick } from 'vue'
 
 const houses = ref([])
@@ -506,22 +507,46 @@ async function refreshMapCache() {
   }
 }
 
-function readImageFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = () => reject(new Error('读取图片失败'))
-    reader.readAsDataURL(file)
-  })
+async function compressImageFile(file) {
+  try {
+    return await imageCompression(file, {
+      maxSizeMB: 1,
+      maxWidthOrHeight: 1920,
+      useWebWorker: true
+    })
+  } catch (err) {
+    return file
+  }
+}
+
+async function uploadImageFile(file) {
+  const formData = new FormData()
+  formData.append('file', file, file.name || 'image')
+  const resp = await fetch('/api/uploads', { method: 'POST', body: formData })
+  if (!resp.ok) {
+    throw new Error('图片上传失败')
+  }
+  const payload = await resp.json()
+  if (!payload?.url) {
+    throw new Error('图片上传失败')
+  }
+  return payload
 }
 
 async function handleImageChange(event) {
   const files = Array.from(event.target.files || [])
   if (!files.length) return
+  errorMessage.value = ''
   for (const file of files) {
-    const dataUrl = await readImageFile(file)
-    layoutImages.value.push(dataUrl)
-    layoutImageType.value = file.type || 'image'
+    try {
+      const compressed = await compressImageFile(file)
+      const uploaded = await uploadImageFile(compressed)
+      layoutImages.value.push(uploaded.url)
+      layoutImageType.value = uploaded.contentType || compressed.type || 'image'
+    } catch (err) {
+      errorMessage.value = err.message || '图片上传失败'
+      break
+    }
   }
   event.target.value = ''
 }
@@ -532,9 +557,15 @@ async function handlePaste(event) {
   if (!imageItem) return
   const file = imageItem.getAsFile()
   if (!file) return
-  const dataUrl = await readImageFile(file)
-  layoutImages.value.push(dataUrl)
-  layoutImageType.value = file.type || 'image'
+  try {
+    errorMessage.value = ''
+    const compressed = await compressImageFile(file)
+    const uploaded = await uploadImageFile(compressed)
+    layoutImages.value.push(uploaded.url)
+    layoutImageType.value = uploaded.contentType || compressed.type || 'image'
+  } catch (err) {
+    errorMessage.value = err.message || '图片上传失败'
+  }
 }
 
 function removeImage(index) {

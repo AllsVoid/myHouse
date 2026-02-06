@@ -7,9 +7,13 @@ from datetime import datetime, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import quote
+from uuid import uuid4
 
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from starlette.requests import Request
@@ -46,6 +50,11 @@ AMAP_JS_KEY = os.getenv("AMAP_JS_KEY", "").strip()
 AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 API_BASE_URL = os.getenv("API_BASE_URL", "").strip()
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "").strip()
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
+AWS_REGION = os.getenv("AWS_REGION", "").strip()
+S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
+S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL", "").strip()
 FRONTEND_ORIGINS = os.getenv(
     "FRONTEND_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173",
@@ -261,6 +270,53 @@ def _house_has_columns(conn, column_names: list[str]) -> bool:
         )
         existing = {row[0] for row in cur.fetchall()}
     return all(name in existing for name in column_names)
+
+
+def _get_s3_client():
+    if not S3_BUCKET or not AWS_REGION:
+        raise HTTPException(status_code=400, detail="Missing S3 configuration")
+    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+        raise HTTPException(status_code=400, detail="Missing S3 credentials")
+    return boto3.client(
+        "s3",
+        region_name=AWS_REGION,
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    )
+
+
+def _build_s3_public_url(key: str) -> str:
+    base = S3_PUBLIC_BASE_URL
+    if not base:
+        base = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com"
+    return f"{base.rstrip('/')}/{quote(key)}"
+
+
+@app.post("/api/uploads")
+async def upload_image(file: UploadFile = File(...)):
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image uploads are supported")
+    suffix = Path(file.filename or "").suffix
+    if not suffix and file.content_type:
+        import mimetypes
+
+        suffix = mimetypes.guess_extension(file.content_type) or ""
+    key = f"house-images/{datetime.now(timezone.utc):%Y/%m}/{uuid4().hex}{suffix}"
+    client = _get_s3_client()
+    try:
+        client.upload_fileobj(
+            file.file,
+            S3_BUCKET,
+            key,
+            ExtraArgs={"ContentType": file.content_type},
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise HTTPException(status_code=500, detail="Upload to S3 failed") from exc
+    return {
+        "url": _build_s3_public_url(key),
+        "key": key,
+        "contentType": file.content_type,
+    }
 
 
 def _safe_float(value: object) -> Optional[float]:
