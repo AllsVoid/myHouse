@@ -1,5 +1,7 @@
 """FastAPI web app for GeoJSON viewer."""
 
+import hashlib
+import io
 import json
 import os
 import sys
@@ -7,7 +9,7 @@ from datetime import datetime, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from typing import List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 import boto3
@@ -306,6 +308,54 @@ def _get_s3_client():
     )
 
 
+def _extract_s3_key(value: str) -> str:
+    if not value:
+        return ""
+    text = value.strip()
+    if not text or text.startswith("data:"):
+        return ""
+    if "://" not in text:
+        return text.lstrip("/")
+    parsed = urlparse(text)
+    path = (parsed.path or "").lstrip("/")
+    if not path:
+        return ""
+    bucket = BUCKET_NAME or S3_BUCKET
+    if bucket and path.startswith(f"{bucket}/"):
+        path = path[len(bucket) + 1 :]
+    return path
+
+
+def _delete_s3_objects(keys: list[str]) -> None:
+    targets = [key for key in keys if key]
+    if not targets:
+        return
+    bucket = BUCKET_NAME or S3_BUCKET
+    if not bucket:
+        raise HTTPException(status_code=400, detail="Missing S3 configuration")
+    client = _get_s3_client()
+    response = client.delete_objects(
+        Bucket=bucket,
+        Delete={"Objects": [{"Key": key} for key in targets], "Quiet": False},
+    )
+    errors = response.get("Errors") or []
+    real_errors = [
+        err
+        for err in errors
+        if (err.get("Code") or "").lower() not in {"nosuchkey", "notfound", "404"}
+    ]
+    if real_errors:
+        raise HTTPException(status_code=500, detail="Failed to delete some images")
+
+
+def _normalize_layout_images(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    if value:
+        return [str(value)]
+    return []
+
+
 def _build_s3_public_url(key: str) -> str:
     if OUTPUT_URL_PATTERN:
         safe_key = quote(key)
@@ -373,24 +423,36 @@ async def upload_image(file: UploadFile = File(...)):
         import mimetypes
 
         suffix = mimetypes.guess_extension(file.content_type) or ""
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty upload")
+    digest = hashlib.sha256(data).hexdigest()
+    hash12 = digest[:12]
     prefix = (UPLOAD_PATH or "house-images").strip("/")
     date_path = f"{datetime.now(timezone.utc):%Y/%m}"
     key = (
-        f"{prefix}/{date_path}/{uuid4().hex}{suffix}"
+        f"{prefix}/{date_path}/{hash12}{suffix}"
         if prefix
-        else f"{date_path}/{uuid4().hex}{suffix}"
+        else f"{date_path}/{hash12}{suffix}"
     )
     client = _get_s3_client()
     extra_args = {"ContentType": file.content_type}
     if ACL and ACL.lower() != "default":
         extra_args["ACL"] = ACL
     try:
-        client.upload_fileobj(
-            file.file,
-            BUCKET_NAME or S3_BUCKET,
-            key,
-            ExtraArgs=extra_args,
-        )
+        bucket = BUCKET_NAME or S3_BUCKET
+        try:
+            client.head_object(Bucket=bucket, Key=key)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if code not in {"404", "NoSuchKey", "NotFound"}:
+                raise
+            client.upload_fileobj(
+                io.BytesIO(data),
+                bucket,
+                key,
+                ExtraArgs=extra_args,
+            )
     except NoCredentialsError as exc:
         raise HTTPException(status_code=400, detail="Missing S3 credentials") from exc
     except (BotoCoreError, ClientError) as exc:
@@ -863,6 +925,14 @@ async def update_house(house_id: int, request: Request):
             _ensure_house_table(conn)
             with conn.cursor() as cur:
                 cur.execute(
+                    "SELECT layout_images FROM house_data WHERE id = %s;",
+                    (house_id,),
+                )
+                existing = cur.fetchone()
+                if not existing:
+                    raise HTTPException(status_code=404, detail="House not found")
+                previous_images = _normalize_layout_images(existing[0])
+                cur.execute(
                     """
                     UPDATE house_data
                     SET
@@ -929,6 +999,13 @@ async def update_house(house_id: int, request: Request):
                 row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="House not found")
+        current_images = _normalize_layout_images(layout_images)
+        removed_images = [img for img in previous_images if img not in current_images]
+        if removed_images:
+            removed_keys = [_extract_s3_key(img) for img in removed_images]
+            removed_keys = [key for key in removed_keys if key]
+            if removed_keys:
+                _delete_s3_objects(removed_keys)
         return {
             "id": row[0],
             "name": row[1],

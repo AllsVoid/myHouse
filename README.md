@@ -7,7 +7,7 @@
 - LLM 结构化提取：纯文本 -> 结构化 JSON
 - 粗略多边形生成：JSON -> GeoJSON（高德地理编码 + bbox 草稿）
 - 前后端分离：Vue 前端 + FastAPI API
-- 房屋管理：表单录入、图片上传/粘贴、多图预览与看房地图
+- 房屋管理：表单录入、图片上传/粘贴、多图预览与看房地图（支持单图删除与图床去重）
 
 ## 目录结构
 - `app/data_trans`：文件解析与 LLM 结构化
@@ -65,6 +65,16 @@ pnpm dev
 - `AMAP_JS_KEY`：高德 JS API Key（用于前端地图）
 - `AMAP_SECURITY_JS_CODE`：高德安全密钥（如已开通）
 - `FRONTEND_ORIGINS`：前端地址白名单（逗号分隔，默认 `http://localhost:5173`）
+- `BUCKET_NAME` / `S3_BUCKET`：图床桶名称
+- `ENDPOINT` / `S3_PUBLIC_BASE_URL`：图床访问地址
+- `UPLOAD_PATH`：上传路径前缀（服务端会自动拼接 `{year}/{month}/{hash12}{ext}`）
+- `OUTPUT_URL_PATTERN`：自定义访问 URL 模板（推荐包含 `{key}`）
+
+## 安全与防滥用建议（部署到服务器时）
+- 启用反向代理限流（Nginx/Cloudflare），对 `/api/uploads` 设置更严格的速率限制。
+- 对写接口（上传/保存/删除）增加鉴权（API Token、JWT 或内网访问）。
+- 限制 `FRONTEND_ORIGINS`，只允许可信前端域名访问。
+- 图床使用独立的最小权限访问密钥，仅允许必要的读写/删除操作。
 
 ## 说明
 - `polygon` 生成的是草稿多边形，用于快速预览，后续建议人工修正。
