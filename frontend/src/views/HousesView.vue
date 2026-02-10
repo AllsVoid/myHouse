@@ -509,11 +509,18 @@ async function refreshMapCache() {
 
 async function compressImageFile(file) {
   try {
-    return await imageCompression(file, {
+    const compressed = await imageCompression(file, {
       maxSizeMB: 1,
       maxWidthOrHeight: 1920,
-      useWebWorker: true
+      useWebWorker: true,
+      fileType: 'image/webp'
     })
+    const baseName = file.name ? file.name.replace(/\.[^/.]+$/, '') : 'image'
+    const filename = `${baseName}.webp`
+    if (compressed instanceof File && compressed.name.endsWith('.webp')) {
+      return compressed
+    }
+    return new File([compressed], filename, { type: 'image/webp' })
   } catch (err) {
     return file
   }
@@ -530,7 +537,48 @@ async function uploadImageFile(file) {
   if (!payload?.url) {
     throw new Error('图片上传失败')
   }
-  return payload
+  return { ...payload, url: normalizeUploadUrl(payload) }
+}
+
+function normalizeUploadUrl(payload) {
+  const url = payload?.url
+  const key = payload?.key || ''
+  if (!url || !key) return url
+  if (!/\{(protocol|path|fileName|extName|year|month|key)\}/.test(url)) {
+    return url
+  }
+  const pathValue = key.includes('/') ? key.split('/').slice(0, -1).join('/') : ''
+  const encodedPath = pathValue ? encodeURI(pathValue) : ''
+  const filename = key.split('/').pop() || ''
+  const fileName = filename.replace(/\.[^/.]+$/, '')
+  const extName = filename.includes('.') ? filename.split('.').pop() || '' : ''
+  let year = ''
+  let month = ''
+  const parts = key.split('/')
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    if (/^\d{4}$/.test(parts[i]) && /^\d{2}$/.test(parts[i + 1])) {
+      year = parts[i]
+      month = parts[i + 1]
+      break
+    }
+  }
+  const protocol = window.location.protocol.replace(':', '') || 'https'
+  let normalized = url
+    .replaceAll('{protocol}', protocol)
+    .replaceAll('{path}', encodedPath)
+    .replaceAll('{fileName}', encodeURIComponent(fileName))
+    .replaceAll('{extName}', encodeURIComponent(extName))
+    .replaceAll('{year}', year)
+    .replaceAll('{month}', month)
+    .replaceAll('{key}', encodeURI(key))
+  if (encodedPath && key.startsWith(pathValue)) {
+    const encodedKey = encodeURI(key)
+    const duplicate = `/${encodedPath}/${encodedKey}`
+    if (normalized.includes(duplicate)) {
+      normalized = normalized.replace(duplicate, `/${encodedKey}`)
+    }
+  }
+  return normalized
 }
 
 async function handleImageChange(event) {
@@ -570,11 +618,6 @@ async function handlePaste(event) {
 
 function removeImage(index) {
   layoutImages.value.splice(index, 1)
-}
-
-function clearImage() {
-  layoutImages.value = []
-  layoutImageType.value = ''
 }
 
 function triggerFilePicker(event) {
@@ -701,19 +744,23 @@ function triggerFilePicker(event) {
           </div>
           <div v-if="layoutImages.length" class="image-preview">
             <div class="image-preview-grid">
-              <button
-                v-for="(img, idx) in layoutImages"
-                :key="img + idx"
-                class="image-thumb"
-                type="button"
-                @click="openImageViewer(layoutImages, idx, form.name)"
-              >
-                <img :src="img" alt="户型图预览" />
-                <span class="image-index">{{ idx + 1 }}</span>
-              </button>
-            </div>
-            <div class="image-actions">
-              <button type="button" class="ghost-link" @click="clearImage">清空图片</button>
+              <div v-for="(img, idx) in layoutImages" :key="img + idx" class="image-thumb">
+                <button
+                  class="image-preview-btn"
+                  type="button"
+                  @click="openImageViewer(layoutImages, idx, form.name)"
+                >
+                  <img :src="img" alt="户型图预览" />
+                </button>
+                <button
+                  class="image-remove"
+                  type="button"
+                  aria-label="删除图片"
+                  @click.stop="removeImage(idx)"
+                >
+                  ×
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -816,3 +863,38 @@ function triggerFilePicker(event) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.image-thumb {
+  position: relative;
+  overflow: visible;
+}
+
+.image-preview-btn {
+  display: block;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.image-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  transform: translate(50%, -50%);
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.45);
+  color: #fff;
+  font-size: 14px;
+  line-height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+  z-index: 2;
+}
+</style>

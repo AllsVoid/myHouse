@@ -11,6 +11,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 from dotenv import dotenv_values, load_dotenv, set_key
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
@@ -56,6 +57,14 @@ AWS_REGION = os.getenv("AWS_REGION", "").strip()
 AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION", "").strip()
 S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
 S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL", "").strip()
+ACCESS_KEY_ID = os.getenv("ACCESS_KEY_ID", "").strip()
+SECRET_ACCESS_KEY = os.getenv("SECRET_ACCESS_KEY", "").strip()
+BUCKET_NAME = os.getenv("BUCKET_NAME", "").strip()
+UPLOAD_PATH = os.getenv("UPLOAD_PATH", "").strip()
+REGION = os.getenv("REGION", "").strip()
+ENDPOINT = os.getenv("ENDPOINT", "").strip()
+ACL = os.getenv("ACL", "").strip()
+OUTPUT_URL_PATTERN = os.getenv("OUTPUT_URL_PATTERN", "").strip()
 FRONTEND_ORIGINS = os.getenv(
     "FRONTEND_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173",
@@ -279,24 +288,79 @@ def _house_has_columns(conn, column_names: list[str]) -> bool:
 
 
 def _get_s3_client():
-    if not S3_BUCKET:
+    bucket = BUCKET_NAME or S3_BUCKET
+    if not bucket:
         raise HTTPException(status_code=400, detail="Missing S3 configuration")
-    region = AWS_REGION or AWS_DEFAULT_REGION or None
+    region = REGION or AWS_REGION or AWS_DEFAULT_REGION or None
+    access_key = ACCESS_KEY_ID or AWS_ACCESS_KEY_ID or None
+    secret_key = SECRET_ACCESS_KEY or AWS_SECRET_ACCESS_KEY or None
+    endpoint_url = ENDPOINT or None
+    config = Config(s3={"addressing_style": "path"}) if endpoint_url else None
     return boto3.client(
         "s3",
         region_name=region,
-        aws_access_key_id=AWS_ACCESS_KEY_ID or None,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY or None,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        endpoint_url=endpoint_url,
+        config=config,
     )
 
 
 def _build_s3_public_url(key: str) -> str:
+    if OUTPUT_URL_PATTERN:
+        safe_key = quote(key)
+        bucket = BUCKET_NAME or S3_BUCKET
+        endpoint_url = ENDPOINT
+        base_url = S3_PUBLIC_BASE_URL
+        protocol = "https"
+        for candidate in (endpoint_url, base_url):
+            if isinstance(candidate, str) and "://" in candidate:
+                protocol = candidate.split("://", 1)[0]
+                break
+        path_value = ""
+        file_name = ""
+        ext_name = ""
+        year_value = ""
+        month_value = ""
+        if key:
+            path_value = key.rsplit("/", 1)[0] if "/" in key else ""
+            file_name = Path(key).stem
+            ext_name = Path(key).suffix.lstrip(".")
+            parts = key.split("/")
+            for idx in range(len(parts) - 1):
+                if parts[idx].isdigit() and len(parts[idx]) == 4:
+                    next_part = parts[idx + 1]
+                    if next_part.isdigit() and len(next_part) == 2:
+                        year_value = parts[idx]
+                        month_value = next_part
+                        break
+        replacements = {
+            "{key}": safe_key,
+            "{bucket}": bucket or "",
+            "{protocol}": protocol,
+            "{path}": quote(path_value) if path_value else "",
+            "{fileName}": quote(file_name) if file_name else "",
+            "{extName}": quote(ext_name) if ext_name else "",
+            "{year}": year_value,
+            "{month}": month_value,
+        }
+        url = OUTPUT_URL_PATTERN
+        for token, value in replacements.items():
+            url = url.replace(token, value)
+        if "{key}" not in OUTPUT_URL_PATTERN and "{fileName}" not in OUTPUT_URL_PATTERN:
+            url = f"{OUTPUT_URL_PATTERN.rstrip('/')}/{safe_key}"
+        return url
     base = S3_PUBLIC_BASE_URL
     if not base:
-        region = AWS_REGION or AWS_DEFAULT_REGION
-        if not region:
-            raise HTTPException(status_code=400, detail="Missing S3 region")
-        base = f"https://{S3_BUCKET}.s3.{region}.amazonaws.com"
+        endpoint_url = ENDPOINT
+        bucket = BUCKET_NAME or S3_BUCKET
+        if endpoint_url and bucket:
+            base = f"{endpoint_url.rstrip('/')}/{bucket}"
+        else:
+            region = AWS_REGION or AWS_DEFAULT_REGION or REGION
+            if not region:
+                raise HTTPException(status_code=400, detail="Missing S3 region")
+            base = f"https://{bucket}.s3.{region}.amazonaws.com"
     return f"{base.rstrip('/')}/{quote(key)}"
 
 
@@ -309,14 +373,23 @@ async def upload_image(file: UploadFile = File(...)):
         import mimetypes
 
         suffix = mimetypes.guess_extension(file.content_type) or ""
-    key = f"house-images/{datetime.now(timezone.utc):%Y/%m}/{uuid4().hex}{suffix}"
+    prefix = (UPLOAD_PATH or "house-images").strip("/")
+    date_path = f"{datetime.now(timezone.utc):%Y/%m}"
+    key = (
+        f"{prefix}/{date_path}/{uuid4().hex}{suffix}"
+        if prefix
+        else f"{date_path}/{uuid4().hex}{suffix}"
+    )
     client = _get_s3_client()
+    extra_args = {"ContentType": file.content_type}
+    if ACL and ACL.lower() != "default":
+        extra_args["ACL"] = ACL
     try:
         client.upload_fileobj(
             file.file,
-            S3_BUCKET,
+            BUCKET_NAME or S3_BUCKET,
             key,
-            ExtraArgs={"ContentType": file.content_type},
+            ExtraArgs=extra_args,
         )
     except NoCredentialsError as exc:
         raise HTTPException(status_code=400, detail="Missing S3 credentials") from exc
@@ -387,6 +460,14 @@ _SETTINGS_KEYS = [
     "AWS_DEFAULT_REGION",
     "S3_BUCKET",
     "S3_PUBLIC_BASE_URL",
+    "ACCESS_KEY_ID",
+    "SECRET_ACCESS_KEY",
+    "BUCKET_NAME",
+    "UPLOAD_PATH",
+    "REGION",
+    "ENDPOINT",
+    "ACL",
+    "OUTPUT_URL_PATTERN",
     "API_BASE_URL",
     "FRONTEND_ORIGINS",
 ]
@@ -397,7 +478,31 @@ _SECRET_KEYS = {
     "AMAP_SECURITY_JS_CODE",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
+    "ACCESS_KEY_ID",
+    "SECRET_ACCESS_KEY",
 }
+
+
+def _get_env_value(key: str) -> str:
+    value = os.getenv(key, "").strip()
+    if value:
+        return value
+    env_path = _get_env_path()
+    if env_path.exists():
+        values = dotenv_values(env_path)
+        return (values.get(key) or "").strip()
+    return ""
+
+
+def _apply_secret_defaults(config: dict) -> dict:
+    for key in _SECRET_KEYS:
+        current = (config.get(key) or "").strip()
+        if current:
+            continue
+        fallback = _get_env_value(key)
+        if fallback:
+            config[key] = fallback
+    return config
 
 
 def _read_settings() -> dict:
@@ -453,16 +558,27 @@ async def save_settings(request: Request):
 
 def _build_s3_client_from_config(config: dict):
     region = (
-        config.get("AWS_REGION") or config.get("AWS_DEFAULT_REGION") or ""
+        config.get("REGION")
+        or config.get("AWS_REGION")
+        or config.get("AWS_DEFAULT_REGION")
+        or ""
     ).strip()
-    access_key = (config.get("AWS_ACCESS_KEY_ID") or "").strip()
-    secret_key = (config.get("AWS_SECRET_ACCESS_KEY") or "").strip()
+    access_key = (
+        config.get("ACCESS_KEY_ID") or config.get("AWS_ACCESS_KEY_ID") or ""
+    ).strip()
+    secret_key = (
+        config.get("SECRET_ACCESS_KEY") or config.get("AWS_SECRET_ACCESS_KEY") or ""
+    ).strip()
+    endpoint_url = (config.get("ENDPOINT") or "").strip()
     kwargs = {}
     if region:
         kwargs["region_name"] = region
     if access_key and secret_key:
         kwargs["aws_access_key_id"] = access_key
         kwargs["aws_secret_access_key"] = secret_key
+    if endpoint_url:
+        kwargs["endpoint_url"] = endpoint_url
+        kwargs["config"] = Config(s3={"addressing_style": "path"})
     return boto3.client("s3", **kwargs)
 
 
@@ -474,7 +590,7 @@ async def test_settings(request: Request):
     target = (data.get("target") or "").strip().lower()
     config = data.get("config") if isinstance(data.get("config"), dict) else {}
     current = _read_settings()
-    merged = {**current, **config}
+    merged = _apply_secret_defaults({**current, **config})
     if target == "postgres":
         if not merged.get("DATABASE_URL") and not os.getenv("DATABASE_URL"):
             raise HTTPException(status_code=400, detail="Missing DATABASE_URL")
@@ -493,9 +609,9 @@ async def test_settings(request: Request):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"status": "ok"}
     if target == "s3":
-        bucket = (merged.get("S3_BUCKET") or "").strip()
+        bucket = (merged.get("BUCKET_NAME") or merged.get("S3_BUCKET") or "").strip()
         if not bucket:
-            raise HTTPException(status_code=400, detail="Missing S3_BUCKET")
+            raise HTTPException(status_code=400, detail="Missing BUCKET_NAME")
         try:
             client = _build_s3_client_from_config(merged)
             client.head_bucket(Bucket=bucket)
@@ -505,7 +621,27 @@ async def test_settings(request: Request):
             ) from exc
         except (BotoCoreError, ClientError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"status": "ok"}
+        return {"status": "ok", "message": "S3 连接正常"}
+    if target == "image":
+        bucket = (merged.get("BUCKET_NAME") or merged.get("S3_BUCKET") or "").strip()
+        if not bucket:
+            raise HTTPException(status_code=400, detail="Missing BUCKET_NAME")
+        if not (
+            (merged.get("OUTPUT_URL_PATTERN") or "").strip()
+            or (merged.get("S3_PUBLIC_BASE_URL") or "").strip()
+            or (merged.get("ENDPOINT") or "").strip()
+        ):
+            raise HTTPException(status_code=400, detail="Missing OUTPUT_URL_PATTERN")
+        try:
+            client = _build_s3_client_from_config(merged)
+            client.head_bucket(Bucket=bucket)
+        except NoCredentialsError as exc:
+            raise HTTPException(
+                status_code=400, detail="Missing S3 credentials"
+            ) from exc
+        except (BotoCoreError, ClientError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "message": "图床配置正常"}
     raise HTTPException(status_code=400, detail="Unsupported test target")
 
 

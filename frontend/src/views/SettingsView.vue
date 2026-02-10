@@ -6,14 +6,20 @@ const isSaving = ref(false)
 const successMessage = ref('')
 const errorMessage = ref('')
 const testMessage = ref('')
+const databaseUrlRef = ref(null)
+const amapKeyRef = ref(null)
+const amapJsKeyRef = ref(null)
+const amapSecurityRef = ref(null)
+const accessKeyRef = ref(null)
+const secretAccessKeyRef = ref(null)
 
 const secretKeys = new Set([
   'DATABASE_URL',
   'AMAP_KEY',
   'AMAP_JS_KEY',
   'AMAP_SECURITY_JS_CODE',
-  'AWS_ACCESS_KEY_ID',
-  'AWS_SECRET_ACCESS_KEY'
+  'ACCESS_KEY_ID',
+  'SECRET_ACCESS_KEY'
 ])
 
 const secretMask = '••••••••••••••••'
@@ -23,21 +29,31 @@ const secretDisplay = reactive({
   AMAP_KEY: '',
   AMAP_JS_KEY: '',
   AMAP_SECURITY_JS_CODE: '',
-  AWS_ACCESS_KEY_ID: '',
-  AWS_SECRET_ACCESS_KEY: ''
+  ACCESS_KEY_ID: '',
+  SECRET_ACCESS_KEY: ''
 })
+const secretRefs = {
+  DATABASE_URL: databaseUrlRef,
+  AMAP_KEY: amapKeyRef,
+  AMAP_JS_KEY: amapJsKeyRef,
+  AMAP_SECURITY_JS_CODE: amapSecurityRef,
+  ACCESS_KEY_ID: accessKeyRef,
+  SECRET_ACCESS_KEY: secretAccessKeyRef
+}
 
 const form = reactive({
   DATABASE_URL: '',
   AMAP_KEY: '',
   AMAP_JS_KEY: '',
   AMAP_SECURITY_JS_CODE: '',
-  AWS_ACCESS_KEY_ID: '',
-  AWS_SECRET_ACCESS_KEY: '',
-  AWS_REGION: '',
-  AWS_DEFAULT_REGION: '',
-  S3_BUCKET: '',
-  S3_PUBLIC_BASE_URL: '',
+  ACCESS_KEY_ID: '',
+  SECRET_ACCESS_KEY: '',
+  BUCKET_NAME: '',
+  UPLOAD_PATH: '',
+  REGION: '',
+  ENDPOINT: '',
+  ACL: '',
+  OUTPUT_URL_PATTERN: '',
   API_BASE_URL: '',
   FRONTEND_ORIGINS: ''
 })
@@ -77,6 +93,26 @@ function onSecretInput(key, event) {
   }
 }
 
+function syncSecretFromRefs() {
+  Object.entries(secretRefs).forEach(([key, inputRef]) => {
+    const inputEl = inputRef.value
+    if (!inputEl) return
+    const value = inputEl.value || ''
+    if (!value) {
+      secretDisplay[key] = ''
+      form[key] = ''
+      return
+    }
+    if (value === secretMask && settingsFlags[`${key}_set`]) {
+      secretDisplay[key] = secretMask
+      form[key] = ''
+      return
+    }
+    secretDisplay[key] = value
+    form[key] = value
+  })
+}
+
 async function fetchSettings() {
   isLoading.value = true
   errorMessage.value = ''
@@ -97,6 +133,7 @@ async function saveSettings() {
   successMessage.value = ''
   errorMessage.value = ''
   testMessage.value = ''
+  syncSecretFromRefs()
   try {
     const resp = await fetch('/api/settings', {
       method: 'POST',
@@ -120,6 +157,7 @@ async function saveSettings() {
 async function runTest(target) {
   testMessage.value = ''
   errorMessage.value = ''
+  syncSecretFromRefs()
   try {
     const resp = await fetch('/api/settings/test', {
       method: 'POST',
@@ -130,7 +168,16 @@ async function runTest(target) {
       const detail = await resp.json().catch(() => null)
       throw new Error(detail?.detail || '测试失败')
     }
-    testMessage.value = target === 'postgres' ? '数据库连接正常' : 'S3 连接正常'
+    const payload = await resp.json().catch(() => ({}))
+    if (payload?.message) {
+      testMessage.value = payload.message
+    } else if (target === 'postgres') {
+      testMessage.value = '数据库连接正常'
+    } else if (target === 'image') {
+      testMessage.value = '图床配置正常'
+    } else {
+      testMessage.value = 'S3 连接正常'
+    }
   } catch (err) {
     errorMessage.value = err.message || '测试失败'
   }
@@ -187,6 +234,7 @@ onMounted(fetchSettings)
                 <input
                   :value="secretDisplay.AMAP_KEY"
                   type="password"
+                  ref="amapKeyRef"
                   @focus="onSecretFocus('AMAP_KEY', $event)"
                   @input="onSecretInput('AMAP_KEY', $event)"
                 />
@@ -196,6 +244,7 @@ onMounted(fetchSettings)
                 <input
                   :value="secretDisplay.AMAP_JS_KEY"
                   type="password"
+                  ref="amapJsKeyRef"
                   @focus="onSecretFocus('AMAP_JS_KEY', $event)"
                   @input="onSecretInput('AMAP_JS_KEY', $event)"
                 />
@@ -205,6 +254,7 @@ onMounted(fetchSettings)
                 <input
                   :value="secretDisplay.AMAP_SECURITY_JS_CODE"
                   type="password"
+                  ref="amapSecurityRef"
                   @focus="onSecretFocus('AMAP_SECURITY_JS_CODE', $event)"
                   @input="onSecretInput('AMAP_SECURITY_JS_CODE', $event)"
                 />
@@ -225,6 +275,7 @@ onMounted(fetchSettings)
                 <input
                   :value="secretDisplay.DATABASE_URL"
                   type="password"
+                  ref="databaseUrlRef"
                   @focus="onSecretFocus('DATABASE_URL', $event)"
                   @input="onSecretInput('DATABASE_URL', $event)"
                 />
@@ -241,38 +292,56 @@ onMounted(fetchSettings)
             </div>
             <div class="settings-grid">
               <label class="settings-field">
-                AWS_ACCESS_KEY_ID
+                ACCESS_KEY_ID
                 <input
-                  :value="secretDisplay.AWS_ACCESS_KEY_ID"
+                  :value="secretDisplay.ACCESS_KEY_ID"
                   type="password"
-                  @focus="onSecretFocus('AWS_ACCESS_KEY_ID', $event)"
-                  @input="onSecretInput('AWS_ACCESS_KEY_ID', $event)"
+                  ref="accessKeyRef"
+                  @focus="onSecretFocus('ACCESS_KEY_ID', $event)"
+                  @input="onSecretInput('ACCESS_KEY_ID', $event)"
                 />
               </label>
               <label class="settings-field">
-                AWS_SECRET_ACCESS_KEY
+                SECRET_ACCESS_KEY
                 <input
-                  :value="secretDisplay.AWS_SECRET_ACCESS_KEY"
+                  :value="secretDisplay.SECRET_ACCESS_KEY"
                   type="password"
-                  @focus="onSecretFocus('AWS_SECRET_ACCESS_KEY', $event)"
-                  @input="onSecretInput('AWS_SECRET_ACCESS_KEY', $event)"
+                  ref="secretAccessKeyRef"
+                  @focus="onSecretFocus('SECRET_ACCESS_KEY', $event)"
+                  @input="onSecretInput('SECRET_ACCESS_KEY', $event)"
                 />
               </label>
               <label class="settings-field">
-                AWS_REGION
-                <input v-model="form.AWS_REGION" type="text" placeholder="ap-southeast-1" />
+                BUCKET_NAME
+                <input v-model="form.BUCKET_NAME" type="text" placeholder="myimage" />
               </label>
               <label class="settings-field">
-                AWS_DEFAULT_REGION
-                <input v-model="form.AWS_DEFAULT_REGION" type="text" placeholder="ap-southeast-1" />
+                UPLOAD_PATH
+                <input v-model="form.UPLOAD_PATH" type="text" placeholder="house-images" />
               </label>
               <label class="settings-field">
-                S3_BUCKET
-                <input v-model="form.S3_BUCKET" type="text" placeholder="bucket-name" />
+                REGION
+                <input v-model="form.REGION" type="text" placeholder="auto" />
               </label>
               <label class="settings-field">
-                S3_PUBLIC_BASE_URL
-                <input v-model="form.S3_PUBLIC_BASE_URL" type="text" placeholder="https://cdn.example.com" />
+                ENDPOINT
+                <input
+                  v-model="form.ENDPOINT"
+                  type="text"
+                  placeholder="https://<account_id>.r2.cloudflarestorage.com"
+                />
+              </label>
+              <label class="settings-field">
+                ACL
+                <input v-model="form.ACL" type="text" placeholder="default" />
+              </label>
+              <label class="settings-field">
+                OUTPUT_URL_PATTERN
+                <input
+                  v-model="form.OUTPUT_URL_PATTERN"
+                  type="text"
+                  placeholder="https://cdn.example.com/{key}"
+                />
               </label>
             </div>
           </section>
@@ -281,8 +350,8 @@ onMounted(fetchSettings)
             <button type="button" @click="runTest('postgres')" :disabled="isSaving">
               测试数据库连接
             </button>
-            <button type="button" @click="runTest('s3')" :disabled="isSaving">
-              测试 S3 连接
+            <button type="button" @click="runTest('image')" :disabled="isSaving">
+              测试图床配置
             </button>
             <button type="submit" :disabled="isSaving">
               {{ isSaving ? '保存中...' : '保存设置' }}
